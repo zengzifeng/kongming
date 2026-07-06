@@ -1,0 +1,61 @@
+# ============================================================================
+# kongming 上传规则（.gitignore）
+# 原则：只上传项目源码；排除「Claude 运行生成文件 / 测试数据 / 编译与环境文件」。
+# 注意：gitignore 不支持行内注释，注释必须独立成行。修改时同步 UPLOAD_RULES.md。
+# ============================================================================
+
+# ---- 1. Claude 运行生成的文件（适配脚本、结果、导出）不入库 ----
+run_realtime_on_testdata.py
+run_realtime_v2.py
+run_time_period_on_testdata.py
+export_time_period_testcase.py
+_*.json
+_*.txt
+*-导出.xlsx
+
+# ---- 2. 测试数据不入库 ----
+kongming-测试数据*.xlsx
+*.xlsx
+*.xls
+*.csv
+
+# ---- 3. Python 编译与虚拟环境 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 4. 后端实例数据与本地数据库 ----
+instance/
+*.db
+*.sqlite
+*.sqlite3
+
+# ---- 5. 前端依赖、缓存与构建产物 ----
+node_modules/
+.npm-cache/
+dist/
+build/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# ---- 6. 操作系统 / 编辑器 / 元数据文件 ----
+._*
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+*.swp
+
+# ---- 7. Claude Code 本地配置 ----
+.claude/

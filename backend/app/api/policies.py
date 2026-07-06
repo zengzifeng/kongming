@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+from flask import Blueprint, request
+
+from ..extensions import db
+from ..repositories import PolicyRepository, PolicyRunRepository
+from ..schemas.common import model_to_dict
+from ..schemas.policy_schema import (
+    PolicyAcceptRequest,
+    PolicyCancelRequest,
+    PolicyPatchRequest,
+    PolicyRecalculateRequest,
+    PolicyRunCreate,
+)
+from ..services import PolicyService
+from ..utils.errors import NotFound
+from ..utils.pagination import parse_pagination
+from ..utils.response import paginated, success
+
+
+bp = Blueprint("policies", __name__)
+
+
+@bp.post("/policy-runs")
+def create_policy_run():
+    payload = PolicyRunCreate(**(request.get_json(silent=True) or {}))
+    run = PolicyService().submit_run(
+        algorithm=payload.algorithm,
+        demand_ids=payload.demand_ids,
+        params=payload.params,
+        triggered_by="manual",
+    )
+    db.session.commit()
+    return success(model_to_dict(run, exclude={"input_snapshot_json"}), status=202)
+
+
+@bp.get("/policy-runs")
+def list_runs():
+    page, page_size = parse_pagination()
+    status = request.args.get("status")
+    algorithm = request.args.get("algorithm")
+    items, total = PolicyRunRepository().list(
+        status=status, algorithm=algorithm, page=page, page_size=page_size,
+    )
+    return paginated(
+        [model_to_dict(r, exclude={"input_snapshot_json"}) for r in items],
+        page, page_size, total,
+    )
+
+
+@bp.get("/policy-runs/<int:run_id>")
+def get_run(run_id: int):
+    run = PolicyService().get_run(run_id)
+    return success(model_to_dict(run, exclude={"input_snapshot_json"}))
+
+
+@bp.get("/policy-runs/<int:run_id>/snapshot")
+def get_run_snapshot(run_id: int):
+    run = PolicyService().get_run(run_id)
+    snapshot = run.input_snapshot_json or {}
+    return success({
+        "input_snapshot": snapshot,
+        "input_hash": run.input_hash,
+        "run": model_to_dict(run, exclude={"input_snapshot_json"}),
+        "demands": snapshot.get("demands", []),
+        "resources": snapshot.get("resources", snapshot.get("clusters", [])),
+        "constraints": snapshot.get("constraints", snapshot.get("params", {})),
+    })
+
+
+@bp.get("/policies")
+def list_policies():
+    page, page_size = parse_pagination()
+    status = request.args.get("status")
+    algorithm = request.args.get("algorithm")
+    policy_run_id = request.args.get("policy_run_id", type=int)
+    exclude_status = request.args.get("exclude_status")
+    items, total = PolicyRepository().list(
+        status=status, algorithm=algorithm, policy_run_id=policy_run_id,
+        exclude_status=exclude_status, page=page, page_size=page_size,
+    )
+    return paginated([model_to_dict(p) for p in items], page, page_size, total)
+
+
+@bp.get("/policies/<int:policy_id>")
+def get_policy(policy_id: int):
+    policy = PolicyService().get_policy(policy_id)
+    actions = PolicyRepository().actions_for(policy.id)
+    return success({
+        "policy": model_to_dict(policy),
+        "actions": [model_to_dict(a) for a in actions],
+    })
+
+
+@bp.patch("/policies/<int:policy_id>")
+def patch_policy(policy_id: int):
+    payload = PolicyPatchRequest(**(request.get_json(silent=True) or {}))
+    policy = PolicyService().patch(policy_id, payload.model_dump(exclude_unset=True))
+    db.session.commit()
+    return success(model_to_dict(policy))
+
+
+@bp.post("/policies/<int:policy_id>/accept")
+def accept_policy(policy_id: int):
+    payload = PolicyAcceptRequest(**(request.get_json(silent=True) or {}))
+    policy = PolicyService().accept(
+        policy_id, operator=payload.operator,
+        effective_from=payload.effective_from,
+        comment=payload.comment,
+    )
+    db.session.commit()
+    return success(model_to_dict(policy))
+
+
+@bp.post("/policies/<int:policy_id>/recalculate")
+def recalculate_policy(policy_id: int):
+    payload = PolicyRecalculateRequest(**(request.get_json(silent=True) or {}))
+    run = PolicyService().recalculate(policy_id, params=payload.params)
+    db.session.commit()
+    return success(model_to_dict(run, exclude={"input_snapshot_json"}))
+
+
+@bp.post("/policies/<int:policy_id>/cancel")
+def cancel_policy(policy_id: int):
+    payload = PolicyCancelRequest(**(request.get_json(silent=True) or {}))
+    policy = PolicyService().cancel(
+        policy_id, operator=payload.operator, reason=payload.reason)
+    db.session.commit()
+    return success(model_to_dict(policy))

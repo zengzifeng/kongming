@@ -1,0 +1,396 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from math import ceil
+
+from ..utils.errors import AlgorithmError
+from ._shared import SolverEconomicsMixin
+from .base import (
+    ConstraintHit,
+    DemandSnapshotItem,
+    PolicyActionDraft,
+    PolicyInputSnapshot,
+    PolicyResult,
+)
+
+
+@dataclass
+class _Candidate:
+    demand: DemandSnapshotItem
+    unit_self_revenue: float
+    best_vendor: dict | None
+    purchase_discount: float
+    must_move: bool
+    series: list[tuple[str, float]]       # [(ts, tpm)] 该客户时段业务量
+    peak_tpm: float                        # 时段内峰值 TPM
+    peak_vendor_gap: float                 # 峰值处“当前走三方、可回收”的量 = peak * (1 - self_ratio)
+    score: float
+
+
+class TimePeriodSolver(SolverEconomicsMixin):
+    """时间段调整：看整段拟合业务量曲线，做「一次」机器重分配，最大化自建集群整段收入积分。
+
+    与 realtime 的区别：机器只调一次、全时段固定、按峰值定容、收益=调整前后收入积分之差。
+    机器总量守恒（只在集群间重分配，不新增）。
+    """
+
+    name = "time_period"
+
+    def solve(self, snapshot: PolicyInputSnapshot) -> PolicyResult:
+        if not snapshot.demands:
+            raise AlgorithmError("快照中无可处理需求", code="ALGORITHM_FAILED")
+        if not snapshot.resources or not snapshot.vendors:
+            raise AlgorithmError("快照缺少资源或三方供应数据", code="ALGORITHM_FAILED")
+        clusters = [dict(c) for c in snapshot.resources.get("clusters", [])]
+        if not clusters:
+            raise AlgorithmError("快照缺少自建集群数据", code="ALGORITHM_FAILED")
+
+        model_prices = snapshot.params.get("model_prices", {})
+        vendors = snapshot.vendors
+        timeline = self._timeline(snapshot.demands)
+
+        # ---- A. 客户经济学（时间不变量）+ B. 需求时序剖面 ----
+        candidates, rejected = self._build_candidates(snapshot.demands, vendors, model_prices, timeline)
+        candidates.sort(key=lambda c: c.score, reverse=True)
+
+        # ---- C. 一次机器重分配：按峰值把选中客户所需自建容量配齐 ----
+        machines_before = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
+        node_moves, accepted, rejected = self._plan_reallocation(candidates, clusters, rejected)
+        machines_after = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
+
+        # 每模型调整后的自建容量（machine_count 已被 _plan_reallocation 就地更新）
+        model_self_capacity = self._model_capacity(clusters)
+        # ---- D. 时序积分 + 分时水位 ----
+        after = self._integrate(accepted, clusters, timeline, model_prices, vendors, adjust=True)
+        before = self._integrate(accepted, clusters, timeline, model_prices, vendors, adjust=False)
+        revenue_gain = after["self_revenue"] - before["self_revenue"]
+
+        # ---- E. 约束体检 ----
+        constraints = self._build_constraints(
+            candidates, accepted, rejected, revenue_gain, after, node_moves,
+            machines_before, machines_after,
+        )
+
+        watermark_changes = after["watermarks"]
+        actions: list[PolicyActionDraft] = []
+        for mv in node_moves:
+            actions.append(PolicyActionDraft(action_type="node_move", payload=mv, expected_gain=0.0))
+        for wm in watermark_changes:
+            actions.append(PolicyActionDraft(action_type="watermark_adjust", payload=wm,
+                                             expected_gain=wm.get("customer_revenue_gain", 0.0)))
+
+        return PolicyResult(
+            expected_revenue_gain=revenue_gain,
+            expected_peak_shaving_gain=revenue_gain,
+            expected_off_peak_gain=0.0,
+            constraints=constraints,
+            actions=actions,
+            diagnostics={
+                "solver": self.name,
+                "timeline_points": len(timeline),
+                "candidate_count": len(candidates),
+                "rejected": rejected,
+                "machines_before": machines_before,
+                "machines_after": machines_after,
+                "model_self_capacity": model_self_capacity,
+            },
+            summary={
+                "accepted_customers": [self._accepted_row(c) for c in accepted],
+                "node_moves": node_moves,
+                "watermark_changes": watermark_changes,
+                "self_revenue_before": before["self_revenue"],
+                "self_revenue_after": after["self_revenue"],
+                "expected_revenue_gain": revenue_gain,
+                "self_tpm_integral_before": before["self_tpm_integral"],
+                "self_tpm_integral_after": after["self_tpm_integral"],
+                "machines_total_before": sum(machines_before.values()),
+                "machines_total_after": sum(machines_after.values()),
+            },
+        )
+
+    # ---------------- A + B ----------------
+    def _timeline(self, demands: list[DemandSnapshotItem]) -> list[str]:
+        """所有客户序列并集的有序时间轴；若无序列则退化为单点。"""
+        stamps: set[str] = set()
+        for d in demands:
+            for ts, _ in (d.tpm_series or []):
+                stamps.add(ts)
+        return sorted(stamps) if stamps else ["_flat_"]
+
+    def _series_of(self, demand: DemandSnapshotItem, timeline: list[str]) -> list[tuple[str, float]]:
+        if demand.tpm_series:
+            m = {ts: float(tpm) for ts, tpm in demand.tpm_series}
+            return [(ts, m.get(ts, 0.0)) for ts in timeline]
+        return [(ts, float(demand.expected_tpm)) for ts in timeline]  # 无序列 -> 平序列
+
+    def _build_candidates(self, demands, vendors, model_prices, timeline):
+        candidates: list[_Candidate] = []
+        rejected: list[dict] = []
+        for demand in demands:
+            series = self._series_of(demand, timeline)
+            peak = max((tpm for _, tpm in series), default=0.0)
+            if peak <= 0:
+                rejected.append(self._reject(demand, "non_positive_tpm"))
+                continue
+            vendor = self._best_vendor(demand, vendors)
+            if vendor is None:
+                rejected.append(self._reject(demand, "vendor_capacity_or_model_unavailable"))
+                continue
+            unit = self._unit_self_revenue(demand, model_prices, vendors)
+            purchase_discount = self._purchase_discount(vendor)
+            must_move = demand.discount_rate <= purchase_discount  # 售卖<=采购：留三方亏，必须全挪自建
+            peak_vendor_gap = peak * max(1 - demand.current_self_ratio, 0)
+            if peak_vendor_gap <= 0:
+                rejected.append(self._reject(demand, "already_fully_self_hosted"))
+                continue
+            # 密度优先（M1）：单位自建收入为主键；must_move 置顶
+            score = (1e9 if must_move else 0.0) + unit * 1e6 + max(demand.quality_score, 0) * 0.01
+            candidates.append(_Candidate(
+                demand=demand, unit_self_revenue=unit, best_vendor=vendor,
+                purchase_discount=purchase_discount, must_move=must_move,
+                series=series, peak_tpm=peak, peak_vendor_gap=peak_vendor_gap, score=score,
+            ))
+        return candidates, rejected
+
+    # ---------------- C. 机器重分配 ----------------
+    def _model_capacity(self, clusters: list[dict]) -> dict[str, float]:
+        cap: dict[str, float] = {}
+        for c in clusters:
+            cap[c["deployed_model"]] = cap.get(c["deployed_model"], 0.0) + \
+                float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
+        return cap
+
+    def _servable_clusters(self, demand: DemandSnapshotItem, clusters: list[dict]) -> list[dict]:
+        return self._matching_clusters(demand.model_name, clusters, demand.customer_code)
+
+    def _cluster_committed(self, clusters: list[dict]) -> dict[str, float]:
+        """每集群当前已被本集群主要客户占用的自建量（用于判断可释放余量）。
+        近似：用 current_redundant_tpm 表示空闲，committed = 容量 - 冗余。"""
+        committed = {}
+        for c in clusters:
+            cap = float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
+            redundant = max(float(c.get("current_redundant_tpm", 0) or 0), 0.0)
+            committed[c["cluster_name"]] = max(cap - redundant, 0.0)
+        return committed
+
+    def _plan_reallocation(self, candidates, clusters, rejected):
+        """按峰值给高密度客户配齐自建容量；不足则在集群间腾挪机器（总量守恒）。
+        就地更新 clusters 的 machine_count；返回 (node_moves, accepted, rejected)。"""
+        by_name = {c["cluster_name"]: c for c in clusters}
+        committed = self._cluster_committed(clusters)
+        # 每集群可供出机器数（空闲机器，受最小保留约束）
+        donatable = {c["cluster_name"]: self._donatable_machines(c) for c in clusters}
+        donors_used: set[str] = set()
+        receivers_used: set[str] = set()
+        node_moves: list[dict] = []
+        accepted: list[_Candidate] = []
+
+        for cand in candidates:
+            demand = cand.demand
+            servable = self._servable_clusters(demand, clusters)
+            if not servable:
+                rejected.append(self._reject(demand, "no_servable_cluster"))
+                continue
+            # 该客户在其可服务集群上的当前空闲容量
+            free = sum(max(float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
+                           - committed.get(c["cluster_name"], 0.0), 0.0) for c in servable)
+            need = cand.peak_vendor_gap  # 峰值处要回收的量
+
+            if free < need:
+                moves = self._acquire_machines(
+                    demand, need - free, servable, clusters, by_name,
+                    donatable, donors_used, receivers_used,
+                )
+                for mv in moves:
+                    src, tgt = mv["from_cluster"], mv["to_cluster"]
+                    by_name[src]["machine_count"] -= mv["machine_count"]
+                    by_name[tgt]["machine_count"] += mv["machine_count"]
+                    donatable[src] -= mv["machine_count"]
+                    donors_used.add(src)
+                    receivers_used.add(tgt)
+                    committed[src] = committed.get(src, 0.0)  # 源已提交量不变（挪的是空闲机器）
+                    free += mv["added_tpm"]
+                    node_moves.append(mv)
+
+            take = min(need, free)
+            if take <= 0:
+                rejected.append(self._reject(demand, "self_cluster_capacity_insufficient"))
+                continue
+            # 记账：把 take 计入该客户可服务集群的 committed（优先填满已有集群）
+            self._commit(servable, committed, take)
+            accepted.append(cand)
+
+        return node_moves, accepted, rejected
+
+    def _acquire_machines(self, demand, shortfall_tpm, servable, clusters, by_name,
+                          donatable, donors_used, receivers_used) -> list[dict]:
+        """为承接 demand 腾挪机器到其可服务集群中单机能力最高者。目标速率计产能，源速率释放。"""
+        targets = [c for c in servable if c["cluster_name"] not in donors_used
+                   and float(c.get("tpm_per_machine", 0) or 0) > 0]
+        if not targets:
+            return []
+        target = max(targets, key=lambda c: float(c.get("tpm_per_machine", 0) or 0))
+        target_rate = float(target.get("tpm_per_machine", 0) or 0)
+        sources = [c for c in clusters
+                   if c["cluster_name"] != target["cluster_name"]
+                   and c["cluster_name"] not in receivers_used
+                   and donatable.get(c["cluster_name"], 0) > 0
+                   and float(c.get("tpm_per_machine", 0) or 0) > 0]
+        sources.sort(key=lambda c: donatable.get(c["cluster_name"], 0), reverse=True)
+
+        moves: list[dict] = []
+        added = 0.0
+        for src in sources:
+            if added >= shortfall_tpm:
+                break
+            name = src["cluster_name"]
+            src_rate = float(src.get("tpm_per_machine", 0) or 0)
+            movable = donatable.get(name, 0)
+            if movable <= 0:
+                continue
+            need_machines = max(1, ceil((shortfall_tpm - added) / target_rate))
+            machines = min(movable, need_machines)
+            if machines <= 0:
+                continue
+            moves.append({
+                "from_cluster": name, "to_cluster": target["cluster_name"],
+                "model": demand.model_name, "machine_count": machines,
+                "added_tpm": machines * target_rate, "removed_tpm": machines * src_rate,
+                "from_tpm_per_machine": src_rate, "to_tpm_per_machine": target_rate,
+                "reason": f"承接优质客户 {demand.customer_code}（峰值定容）",
+            })
+            added += machines * target_rate
+        return moves
+
+    def _commit(self, servable, committed, amount):
+        remaining = amount
+        for c in servable:
+            if remaining <= 0:
+                break
+            name = c["cluster_name"]
+            cap = float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
+            free = max(cap - committed.get(name, 0.0), 0.0)
+            put = min(free, remaining)
+            committed[name] = committed.get(name, 0.0) + put
+            remaining -= put
+
+    # ---------------- D. 时序积分 + 分时水位 ----------------
+    def _integrate(self, accepted, clusters, timeline, model_prices, vendors, adjust: bool):
+        """逐时点结算：adjust=True 用调整后容量把高密度客户挪满自建（受【集群级】共享容量约束，
+        专属集群只服务对应客户）；False 用当前占比。返回自建收入积分、自建TPM积分、每客户分时水位。"""
+        unit = {c.demand.report_id: c.unit_self_revenue for c in accepted}
+        wm: dict[str, dict] = {
+            c.demand.report_id: {
+                "report_id": c.demand.report_id, "customer_code": c.demand.customer_code,
+                "model": c.demand.model_name, "current_self_ratio": c.demand.current_self_ratio,
+                "fallback_vendor": (c.best_vendor or {}).get("vendor"),
+                "slots": [], "customer_revenue_gain": 0.0,
+            } for c in accepted
+        }
+        # 按模型分组，模型内按密度排序（高者优先占共享自建容量）
+        by_model: dict[str, list[_Candidate]] = {}
+        for c in accepted:
+            by_model.setdefault(c.demand.model_name, []).append(c)
+        for lst in by_model.values():
+            lst.sort(key=lambda c: c.unit_self_revenue, reverse=True)
+
+        self_revenue = 0.0
+        self_tpm_integral = 0.0
+        peak_overflow_ok = True
+        for ti, ts in enumerate(timeline):
+            # 每时点重置集群级剩余容量（机器一次调整后固定，但每个时点独立结算）
+            cluster_cap = {
+                c["cluster_name"]: float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
+                for c in clusters
+            }
+            for model, lst in by_model.items():
+                for c in lst:
+                    rid = c.demand.report_id
+                    tpm_t = c.series[ti][1]
+                    if adjust:
+                        # 从该客户可服务集群（含专属约束）按序占用共享容量
+                        self_t = self._draw_from_clusters(c.demand, clusters, cluster_cap, tpm_t)
+                    else:
+                        self_t = tpm_t * c.demand.current_self_ratio
+                    vendor_t = max(tpm_t - self_t, 0.0)
+                    self_revenue += self_t * unit[rid]
+                    self_tpm_integral += self_t
+                    if adjust:
+                        self_ratio = (self_t / tpm_t) if tpm_t > 0 else 0.0
+                        wm[rid]["slots"].append({
+                            "ts": ts, "tpm": tpm_t, "self_ratio": round(self_ratio, 4),
+                            "self_tpm": self_t, "vendor_tpm": vendor_t,
+                            "vendor_ratios": {(c.best_vendor or {}).get("vendor", "vendor"): round(1 - self_ratio, 4)},
+                        })
+                        base_self = tpm_t * c.demand.current_self_ratio
+                        wm[rid]["customer_revenue_gain"] += (self_t - base_self) * unit[rid]
+
+        return {
+            "self_revenue": self_revenue,
+            "self_tpm_integral": self_tpm_integral,
+            "watermarks": list(wm.values()) if adjust else [],
+            "peak_overflow_ok": peak_overflow_ok,
+        }
+
+    def _draw_from_clusters(self, demand, clusters, cluster_cap, want_tpm) -> float:
+        """从 demand 的可服务集群（受专属约束）里按序抽取自建容量，返回实际抽到的量。就地扣减 cluster_cap。"""
+        got = 0.0
+        remaining = want_tpm
+        for c in self._matching_clusters(demand.model_name, clusters, demand.customer_code):
+            if remaining <= 0:
+                break
+            name = c["cluster_name"]
+            avail = cluster_cap.get(name, 0.0)
+            if avail <= 0:
+                continue
+            take = min(remaining, avail)
+            cluster_cap[name] = avail - take
+            got += take
+            remaining -= take
+        return got
+
+    # ---------------- E. 约束 ----------------
+    def _build_constraints(self, candidates, accepted, rejected, revenue_gain, after,
+                           node_moves, machines_before, machines_after) -> list[ConstraintHit]:
+        reasons = {r["reason"] for r in rejected}
+        # 峰值覆盖：每个被接客户，其可服务集群容量应 >= 其峰值自建目标（此处已按峰值定容）
+        peak_ok = "self_cluster_capacity_insufficient" not in reasons
+        machines_conserved = sum(machines_before.values()) == sum(machines_after.values())
+        return [
+            ConstraintHit(
+                name="peak_capacity_sufficient", hit=peak_ok, threshold=0.0,
+                actual=float(len(accepted)),
+                description="机器调整后自建+三方需能覆盖峰值需求（自建按峰值定容）",
+            ),
+            ConstraintHit(
+                name="vendor_margin_positive",
+                hit=bool(candidates),
+                threshold=0.0,
+                actual=min((c.demand.discount_rate - c.purchase_discount for c in candidates), default=0.0),
+                description="三方承接部分：售卖折扣需高于采购折扣",
+            ),
+            ConstraintHit(
+                name="high_value_moved_to_self", hit=len(accepted) > 0,
+                threshold=0.0, actual=float(len(accepted)),
+                description="三方上有量的优质客户已挪到自建承接",
+            ),
+            ConstraintHit(
+                name="machines_conserved", hit=machines_conserved, threshold=None,
+                actual=float(sum(machines_after.values())),
+                description="机器总量守恒（仅在集群间重分配，不新增）",
+            ),
+            ConstraintHit(
+                name="positive_revenue_gain", hit=revenue_gain > 0, threshold=0.0,
+                actual=revenue_gain,
+                description="一次机器调整后整段收入积分需高于调整前",
+            ),
+        ]
+
+    def _accepted_row(self, c: _Candidate) -> dict:
+        return {
+            "report_id": c.demand.report_id, "customer_code": c.demand.customer_code,
+            "model": c.demand.model_name, "unit_self_revenue": c.unit_self_revenue,
+            "peak_tpm": c.peak_tpm, "peak_vendor_gap": c.peak_vendor_gap,
+            "must_move": c.must_move, "fallback_vendor": (c.best_vendor or {}).get("vendor"),
+            "score": c.score,
+        }

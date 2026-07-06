@@ -1,0 +1,41 @@
+:root {
+  color-scheme: dark;
+  --km-bg: #071018;
+  --km-panel: rgba(11, 24, 36, 0.86);
+  --km-panel-strong: rgba(13, 35, 52, 0.96);
+  --km-line: rgba(82, 191, 255, 0.18);
+  --km-text: #e6f7ff;
+  --km-muted: #7fa5b7;
+  --km-cyan: #27d7ff;
+  --km-amber: #ffb347;
+  --km-red: #ff5f6d;
+  --km-green: #5dffb2;
+  --km-purple: #9b8cff;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--km-text);
+  background:
+    radial-gradient(circle at 12% 8%, rgba(39, 215, 255, 0.16), transparent 28%),
+    radial-gradient(circle at 82% 16%, rgba(255, 179, 71, 0.12), transparent 30%),
+    linear-gradient(135deg, #050b11 0%, #071018 48%, #0b1720 100%);
+  font-family: Avenir Next, PingFang SC, Microsoft YaHei, sans-serif;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(39, 215, 255, 0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(39, 215, 255, 0.045) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,.8), rgba(0,0,0,.12));
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: rgba(39, 215, 255, .28); border-radius: 999px; }
+::-webkit-scrollbar-track { background: rgba(255,255,255,.04); }
