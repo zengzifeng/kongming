@@ -60,9 +60,13 @@ class TimePeriodSolver(SolverEconomicsMixin):
 
         # 每模型调整后的自建容量（machine_count 已被 _plan_reallocation 就地更新）
         model_self_capacity = self._model_capacity(clusters)
-        # ---- D. 时序积分 + 分时水位 ----
-        after = self._integrate(accepted, clusters, timeline, model_prices, vendors, adjust=True)
-        before = self._integrate(accepted, clusters, timeline, model_prices, vendors, adjust=False)
+
+        # ---- D. 固定水位线：机器调整后「一次性」设定每个客户的自建TPM上限（水位线），此后不随时间变化。 ----
+        watermarks = self._compute_watermarks(accepted, clusters, timeline)
+
+        # ---- 时序积分：水位线固定，仅客户跑量随时间变化 -> 自建/三方分发占比随之变化 ----
+        after = self._integrate(accepted, watermarks, timeline, adjust=True)
+        before = self._integrate(accepted, watermarks, timeline, adjust=False)
         revenue_gain = after["self_revenue"] - before["self_revenue"]
 
         # ---- E. 约束体检 ----
@@ -274,66 +278,90 @@ class TimePeriodSolver(SolverEconomicsMixin):
             committed[name] = committed.get(name, 0.0) + put
             remaining -= put
 
-    # ---------------- D. 时序积分 + 分时水位 ----------------
-    def _integrate(self, accepted, clusters, timeline, model_prices, vendors, adjust: bool):
-        """逐时点结算：adjust=True 用调整后容量把高密度客户挪满自建（受【集群级】共享容量约束，
-        专属集群只服务对应客户）；False 用当前占比。返回自建收入积分、自建TPM积分、每客户分时水位。"""
-        unit = {c.demand.report_id: c.unit_self_revenue for c in accepted}
-        wm: dict[str, dict] = {
-            c.demand.report_id: {
-                "report_id": c.demand.report_id, "customer_code": c.demand.customer_code,
-                "model": c.demand.model_name, "current_self_ratio": c.demand.current_self_ratio,
-                "fallback_vendor": (c.best_vendor or {}).get("vendor"),
-                "slots": [], "customer_revenue_gain": 0.0,
-            } for c in accepted
-        }
-        # 按模型分组，模型内按密度排序（高者优先占共享自建容量）
+    # ---------------- D. 固定水位线 + 时序积分 ----------------
+    def _compute_watermarks(self, accepted, clusters, timeline) -> dict[str, float]:
+        """机器调整后「一次性」为每个客户设定固定的自建TPM上限（水位线）。此后不随时间变化。
+
+        分配口径：在各模型系统峰值时点，先按【当前自建量】保底（不把已在自建的流量赶去三方），
+        再把剩余自建容量按【收入密度】优先分给待回收的三方流量，各客户封顶到其峰值需求。
+        受专属集群约束（KSCC/XISHANJU 只服务对应客户）与集群级容量约束。
+        """
+        watermarks: dict[str, float] = {}
         by_model: dict[str, list[_Candidate]] = {}
         for c in accepted:
             by_model.setdefault(c.demand.model_name, []).append(c)
-        for lst in by_model.values():
-            lst.sort(key=lambda c: c.unit_self_revenue, reverse=True)
 
+        for model, custs in by_model.items():
+            custs = sorted(custs, key=lambda c: c.unit_self_revenue, reverse=True)
+            series = {c.demand.report_id: self._series_of(c.demand, timeline) for c in custs}
+            # 系统峰值时点：该模型全部客户合计需求最大的时刻（水位线按此刻的容量竞争一次性定死）
+            agg = [sum(series[c.demand.report_id][ti][1] for c in custs) for ti in range(len(timeline))]
+            pk = max(range(len(timeline)), key=lambda ti: agg[ti]) if timeline else 0
+            cluster_cap = {
+                cc["cluster_name"]: float(cc.get("machine_count", 0) or 0) * float(cc.get("tpm_per_machine", 0) or 0)
+                for cc in clusters
+            }
+            # 第一轮：按当前自建量保底（顺序无关，各客户从自己可服务集群抽取）
+            base = {}
+            for c in custs:
+                rid = c.demand.report_id
+                d_pk = series[rid][pk][1]
+                cur_self = d_pk * c.demand.current_self_ratio
+                base[rid] = self._draw(c.demand, clusters, cluster_cap, cur_self)
+            # 第二轮：剩余容量按密度优先回收三方流量，封顶到峰值需求
+            for c in custs:
+                rid = c.demand.report_id
+                d_pk = series[rid][pk][1]
+                extra = self._draw(c.demand, clusters, cluster_cap, max(d_pk - base[rid], 0.0))
+                watermarks[rid] = base[rid] + extra
+        return watermarks
+
+    def _integrate(self, accepted, watermarks, timeline, adjust: bool):
+        """时序积分：水位线固定，逐时点 self(t)=min(需求(t), 水位线)；三方=需求−自建。
+        分发占比随时间变化仅因客户跑量变化。adjust=False 用调整前的当前占比作对照基线。"""
         self_revenue = 0.0
         self_tpm_integral = 0.0
-        peak_overflow_ok = True
-        for ti, ts in enumerate(timeline):
-            # 每时点重置集群级剩余容量（机器一次调整后固定，但每个时点独立结算）
-            cluster_cap = {
-                c["cluster_name"]: float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
-                for c in clusters
-            }
-            for model, lst in by_model.items():
-                for c in lst:
-                    rid = c.demand.report_id
-                    tpm_t = c.series[ti][1]
-                    if adjust:
-                        # 从该客户可服务集群（含专属约束）按序占用共享容量
-                        self_t = self._draw_from_clusters(c.demand, clusters, cluster_cap, tpm_t)
-                    else:
-                        self_t = tpm_t * c.demand.current_self_ratio
-                    vendor_t = max(tpm_t - self_t, 0.0)
-                    self_revenue += self_t * unit[rid]
-                    self_tpm_integral += self_t
-                    if adjust:
-                        self_ratio = (self_t / tpm_t) if tpm_t > 0 else 0.0
-                        wm[rid]["slots"].append({
-                            "ts": ts, "tpm": tpm_t, "self_ratio": round(self_ratio, 4),
-                            "self_tpm": self_t, "vendor_tpm": vendor_t,
-                            "vendor_ratios": {(c.best_vendor or {}).get("vendor", "vendor"): round(1 - self_ratio, 4)},
-                        })
-                        base_self = tpm_t * c.demand.current_self_ratio
-                        wm[rid]["customer_revenue_gain"] += (self_t - base_self) * unit[rid]
-
+        wm_out: list[dict] = []
+        for c in accepted:
+            rid = c.demand.report_id
+            unit = c.unit_self_revenue
+            level = watermarks.get(rid, 0.0)           # 固定水位线（自建TPM上限）
+            series = self._series_of(c.demand, timeline)
+            slots = []
+            cust_gain = 0.0
+            for ts, tpm_t in series:
+                if adjust:
+                    self_t = min(tpm_t, level)          # ← 水位线固定，只有 tpm_t 变
+                else:
+                    self_t = tpm_t * c.demand.current_self_ratio   # 调整前：当前占比
+                vendor_t = max(tpm_t - self_t, 0.0)
+                self_revenue += self_t * unit
+                self_tpm_integral += self_t
+                if adjust:
+                    ratio = (self_t / tpm_t) if tpm_t > 0 else 0.0
+                    slots.append({
+                        "ts": ts, "tpm": tpm_t, "self_ratio": round(ratio, 4),
+                        "self_tpm": self_t, "vendor_tpm": vendor_t,
+                        "vendor_ratios": {(c.best_vendor or {}).get("vendor", "vendor"): round(1 - ratio, 4)},
+                    })
+                    cust_gain += (self_t - tpm_t * c.demand.current_self_ratio) * unit
+            if adjust:
+                wm_out.append({
+                    "report_id": rid, "customer_code": c.demand.customer_code,
+                    "model": c.demand.model_name, "current_self_ratio": c.demand.current_self_ratio,
+                    "watermark_self_tpm": level,        # 固定水位线（本次调整一次性设定）
+                    "fallback_vendor": (c.best_vendor or {}).get("vendor"),
+                    "slots": slots, "customer_revenue_gain": cust_gain,
+                })
         return {
             "self_revenue": self_revenue,
             "self_tpm_integral": self_tpm_integral,
-            "watermarks": list(wm.values()) if adjust else [],
-            "peak_overflow_ok": peak_overflow_ok,
+            "watermarks": wm_out,
+            "peak_overflow_ok": True,
         }
 
-    def _draw_from_clusters(self, demand, clusters, cluster_cap, want_tpm) -> float:
-        """从 demand 的可服务集群（受专属约束）里按序抽取自建容量，返回实际抽到的量。就地扣减 cluster_cap。"""
+    def _draw(self, demand, clusters, cluster_cap, want_tpm) -> float:
+        """从 demand 的可服务集群（受专属约束）按序抽取容量，返回实际抽到量，就地扣减 cluster_cap。"""
         got = 0.0
         remaining = want_tpm
         for c in self._matching_clusters(demand.model_name, clusters, demand.customer_code):
