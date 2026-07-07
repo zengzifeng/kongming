@@ -1,0 +1,369 @@
+# kongming 调度算法说明：`realtime` 与 `time_period`
+
+> 面向读者：算法/后端/产品。目标是把两个求解器（solver）从**输入 → 运算逻辑 → 约束条件 → 输出**讲清楚。
+> 代码位置：[backend/app/algorithms/](../backend/app/algorithms/)
+> - 共享经济学与集群物理规则：[_shared.py](../backend/app/algorithms/_shared.py)（`SolverEconomicsMixin`）
+> - 数据结构：[base.py](../backend/app/algorithms/base.py)
+> - 实时算法：[realtime_solver.py](../backend/app/algorithms/realtime_solver.py)（`RealtimeSolver`）
+> - 时段算法：[time_period_solver.py](../backend/app/algorithms/time_period_solver.py)（`TimePeriodSolver`）
+> - 注册与调用：[__init__.py](../backend/app/algorithms/__init__.py)、[policy_service.py](../backend/app/services/policy_service.py)
+
+---
+
+## 0. 业务背景与一句话定位
+
+这是一个 **AI 网关**的流量调度平台。客户的 token 业务量（TPM = tokens per minute）可以由两种资源承接：
+
+- **自建集群（self）**：我们自己的 GPU 机器。边际成本 ≈ 0，承接得越多、赚得越多，但**容量有限**。
+- **三方供应商（vendor）**：外部 API 兜底。有采购成本，容量按额度（quota）供应，作为自建放不下时的溢出承接。
+
+两个算法解决的是同一个核心问题：**在自建容量 + 三方兜底的约束下，把高收益客户流量尽量搬到自建，最大化自建承接收益。** 区别在时间尺度：
+
+| | `realtime` 实时算法 | `time_period` 时段算法 |
+|---|---|---|
+| 时间视角 | **某一时刻的快照**（分钟级） | **一整段时间的业务量曲线**（如 24 个整点） |
+| 自建容量口径 | 集群当前**冗余** TPM（`current_redundant_tpm`） | 集群**满容量**（`machine_count × tpm_per_machine`），按**峰值**定容 |
+| 机器调整 | 把闲置机器**临时腾挪**补冗余 | **一次性**重分配机器，全时段固定 |
+| 水位线（自建 TPM 上限） | 每次分配即时确定 | 机器调整后**一次性设定、此后不随时间变化** |
+| 收益口径 | 单点收益 × 60（折算到小时） | 调整前后**整段收入积分之差** |
+| 机器总量 | 守恒（只挪闲置机器） | 守恒（只在集群间重分配，不新增） |
+
+### 0.1 系统调用链路（两算法共用）
+
+从一次测算请求到落库，两个算法共用同一条流水线，仅在 `get_solver(algorithm)` 处分流：
+
+```mermaid
+flowchart LR
+    Req(["提交测算<br/>submit_run(algorithm, demand_ids, params)"]) --> Load["加载已审批需求<br/>_load_demands"]
+    Load --> Snap["build_snapshot()<br/>装配 resources / monitoring / vendors / demands"]
+    Snap --> Hash["计算 input_hash、落 PolicyRun(QUEUED)"]
+    Hash --> Pick{"get_solver(algorithm)"}
+    Pick -->|realtime| RS["RealtimeSolver.solve()"]
+    Pick -->|time_period| TS["TimePeriodSolver.solve()"]
+    RS --> Res["PolicyResult<br/>收益 / 约束 / actions / summary"]
+    TS --> Res
+    Res --> Persist["_persist_policy：落 Policy(DRAFT) + PolicyAction*"]
+    Persist --> Done(["PolicyRun = SUCCESS<br/>返回给上层供人工采纳"])
+```
+
+> 求解器是**纯函数式**的：输入 `PolicyInputSnapshot`、输出 `PolicyResult`，不触库、不产生副作用。落库与状态流转由 [policy_service.py](../backend/app/services/policy_service.py) 负责。算法失败抛 `AlgorithmError` → `PolicyRun` 置 `FAILED`。
+
+---
+
+## 1. 共享基础（两算法通用）
+
+### 1.1 输入数据结构
+
+所有输入被打包进一个 `PolicyInputSnapshot`（[base.py](../backend/app/algorithms/base.py)），由 [snapshot.py](../backend/app/algorithms/snapshot.py) 的 `build_snapshot()` 从资源/监控/供应商三个 client 组装。字段：
+
+**`PolicyInputSnapshot`**
+
+| 字段 | 含义 |
+|---|---|
+| `demands` | 客户需求列表 `list[DemandSnapshotItem]` |
+| `resources` | `{"clusters": [...]}` 自建集群资源快照 |
+| `vendors` | 三方供应商额度/报价列表 `list[dict]` |
+| `params` | 参数，主要含 `model_prices`（各模型列表价） |
+| `monitoring` | 监控快照（当前算法未直接使用其数值） |
+| `captured_at` / `algorithm` | 快照时间 / 算法名 |
+
+**`DemandSnapshotItem`（单个客户需求）**
+
+| 字段 | 含义 |
+|---|---|
+| `report_id` | 需求唯一标识 |
+| `customer_code` | 客户编码（专属集群匹配用） |
+| `model_name` | 客户使用的模型 |
+| `expected_tpm` | 预期业务量（tokens/min）；时段算法里作为峰值基准 |
+| `discount_rate` | **售卖折扣**（我们卖给客户打的折，如 0.8） |
+| `input_ratio` / `output_ratio` | 输入/输出 token 占比（算加权列表价） |
+| `cache_hit_rate` | 缓存命中率（命中价更低） |
+| `current_self_ratio` | 当前已在自建承接的比例 |
+| `current_vendor_ratios` | 当前各三方承接比例 |
+| `quality_score` | 客户质量分（排序次要项） |
+| `tpm_series` | `[(时间戳, tpm), ...]` 时段业务量曲线。**仅 `time_period` 使用**；为空则退化为 `expected_tpm` 平序列。`realtime` 忽略此字段 |
+
+**集群资源项（`resources["clusters"]` 每个元素）** — 关键字段：
+
+| 字段 | 含义 |
+|---|---|
+| `cluster_name` | 集群名（含 `KSCC`/`XISHANJU` 视为**专属集群**） |
+| `deployed_model` | 该集群部署的模型（决定能服务哪些需求） |
+| `primary_customer` | 专属客户（专属集群只服务它） |
+| `machine_count` | 机器台数 |
+| `tpm_per_machine` | 单机产能（tokens/min） |
+| `current_redundant_tpm` | 当前**空闲** TPM（realtime 的容量口径） |
+| `current_redundant_machines` / `busy_redundant_machines` | 当前空闲机器数（可供出机器口径） |
+
+**三方供应商项（`vendors` 每个元素）**
+
+| 字段 | 含义 |
+|---|---|
+| `vendor` | 供应商名 |
+| `model` | 供应的模型 |
+| `quota_tpm` | 可用额度（TPM） |
+| `unit_cost` | **采购成本**（我们付给三方，每 token） |
+| `unit_price` | 三方对应的列表价（用于算采购折扣） |
+
+### 1.2 共享经济学口径（`SolverEconomicsMixin`）
+
+两个算法继承同一个 Mixin（[_shared.py](../backend/app/algorithms/_shared.py)），保证口径一致：
+
+**① 单位自建收入（收入密度）`_unit_self_revenue`** —— 排序的核心指标：
+
+```
+加权列表价 = 输入占比 × [命中率 × 命中价 + (1-命中率) × 未命中价] + 输出占比 × 输出价
+单位自建收入 = 加权列表价 × 售卖折扣(discount_rate)
+```
+其中输入/输出占比先归一化；若模型无 `model_prices` 配置，用三方 `unit_price` 兜底（命中价默认按 `unit_price × 0.2`）。这个值代表**每单位 TPM 放到自建能赚的钱**（自建边际成本≈0，故约等于净收益密度）。
+
+**② 最优三方 `_best_vendor`**：在 `model==客户模型 且 quota_tpm>0` 的供应商里，取 `unit_cost` **最低**者作为兜底。找不到 → 拒收 `vendor_capacity_or_model_unavailable`。
+
+**③ 采购折扣 `_purchase_discount`** = `vendor.unit_cost / vendor.unit_price`。
+> **`must_move` 判定**：若 `客户售卖折扣 ≤ 采购折扣`，意味着这部分留在三方是**亏钱**的（卖价 ≤ 进价），必须优先全挪自建止损。这类客户在排序中被置顶。
+
+**④ 集群物理规则**
+
+- `_matching_clusters(model, clusters, customer_code)`：筛出 `deployed_model==model` 的集群；**专属集群**（名字含 `KSCC`/`XISHANJU`）只有当 `primary_customer==该客户` 时才可用，否则不进共享池。
+- `_min_reserve_machines`：`KSCC` 集群常态**最少保留 2 台**。
+- `_donatable_machines`：可供出机器 = `min(空闲机器数, 总机器 − 最小保留)`，且 ≥0。
+
+---
+
+## 2. `realtime` 实时算法
+
+**定位**：分钟级实时调度。看**某一时刻**的需求与集群冗余，在自建冗余容量 + 三方兜底下，把高收益客户流量搬到自建，最大化单点自建收益。
+
+### 2.1 输入
+
+- `snapshot.demands`：客户需求（**不使用** `tpm_series`，只用 `expected_tpm` 等标量）。
+- `snapshot.resources["clusters"]`：自建集群，容量口径为 `current_redundant_tpm`（当前冗余）。
+- `snapshot.vendors`：三方额度与报价。
+- `snapshot.params["model_prices"]`：模型列表价。
+
+前置校验（任一不满足抛 `AlgorithmError`）：需求非空、资源与三方数据存在、集群列表非空。
+
+### 2.2 运算逻辑（流程图）
+
+```mermaid
+flowchart TD
+    Start(["输入 PolicyInputSnapshot（不含 tpm_series）"]) --> V{"校验：需求 / 资源 / 集群非空？"}
+    V -->|否| Err["抛 AlgorithmError"]
+    V -->|是| Init["Step0 初始化账本：<br/>vendor_remaining 三方额度<br/>cluster_remaining 集群冗余TPM<br/>cluster_extra_machines 可供出机器"]
+    Init --> Build["Step1 构造候选 _build_candidates（逐客户）"]
+    Build --> Filter{"过滤"}
+    Filter -->|"tpm≤0 / 无三方 / 已全自建"| Rej1["拒收（记 rejected）"]
+    Filter -->|通过| Score["计算 单位自建收入、must_move<br/>score = must_move置顶(1e9) + 密度×1e6 + 质量×0.01<br/>vendor_gap = tpm×(1−self_ratio)"]
+    Score --> Sort["Step2 按 score 降序排序"]
+    Sort --> R1["Step3 第一轮：用现有集群冗余承接<br/>_allocate_to_existing_cluster"]
+    R1 --> R1C{"allocated > 0？"}
+    R1C -->|"否（无冗余）"| Pend["暂存 remaining_candidates"]
+    R1C -->|是| Record1["Step5 记账 _record_customer_actions<br/>产出 watermark_adjust + model_assign<br/>扣三方额度、累计自建收入/三方成本"]
+    Pend --> R2["Step4 第二轮：机器腾挪 _plan_node_move"]
+    R2 --> R2C{"能腾挪出容量？<br/>禁止倒手 / 总量守恒 / KSCC最小保留<br/>产能非对称：目标按目标速率、源按源速率"}
+    R2C -->|否| Rej2["拒收 self_cluster_capacity_insufficient"]
+    R2C -->|是| Realloc["更新 cluster_remaining（源−removed、目标+added）<br/>产出 node_move"]
+    Realloc --> R2A{"再分配 allocated > 0？"}
+    R2A -->|否| Rej3["拒收 ..._after_node_move"]
+    R2A -->|是| Record2["Step5 记账"]
+    Record1 --> Sum["Step6 汇总：收益 = Σ自建收入 − Σ三方成本（×60 折算小时）"]
+    Record2 --> Sum
+    Sum --> Cons["约束体检（6 项）"]
+    Cons --> Out(["输出 PolicyResult<br/>actions: watermark_adjust / model_assign / node_move"])
+```
+
+### 2.3 运算逻辑（分步详解）
+
+**Step 0 — 初始化可变账本**
+- `vendor_remaining`：各三方剩余额度（键 = `vendor::model`）。
+- `cluster_remaining`：各集群剩余冗余 TPM（初值 = `current_redundant_tpm`）。
+- `cluster_extra_machines`：各集群可供出机器数（`_donatable_machines`）。
+
+**Step 1 — 构造候选 `_build_candidates`**（逐个客户）：
+1. `expected_tpm ≤ 0` → 拒收 `non_positive_tpm`。
+2. 计算 `unit_self_revenue`；找 `best_vendor`，无 → 拒收 `vendor_capacity_or_model_unavailable`。
+3. 计算 `must_move`（售卖折扣 ≤ 采购折扣）。
+4. `current_vendor_tpm = expected_tpm × (1 − current_self_ratio)`。若 ≤0（已全自建）→ 拒收 `already_fully_self_hosted`。**只回收当前走三方的这部分**，不动已在自建的量。
+5. 打分（**密度优先的分数背包**）：
+   ```
+   score = (must_move ? 1e9 : 0) + unit_self_revenue × 1e6 + max(quality_score,0) × 0.01
+   ```
+   `vendor_gap_tpm = current_vendor_tpm`（可回收到自建的量）。
+
+**Step 2 — 按 score 降序排序**（must_move 置顶，其次收入密度，再次质量分）。
+
+**Step 3 — 第一轮：用现有集群冗余承接** `_allocate_to_existing_cluster`
+逐候选、从其可服务集群里取 `min(剩余需求, 集群冗余)`，扣减 `cluster_remaining`，累计 `allocated`（上限 = `vendor_gap_tpm`）。
+- `allocated > 0` → 记账 `_record_customer_actions`（见下）。
+- `allocated ≤ 0`（无冗余）→ 暂存到 `remaining_candidates`，进第二轮。
+
+**Step 4 — 第二轮：机器腾挪补容量** `_plan_node_move`
+对第一轮没吃到容量的候选，尝试从别的集群把**闲置机器**挪到目标集群：
+- **目标** = 该客户可服务集群里 `tpm_per_machine` 最高者（且未当过供出方）。
+- **源** = 其他集群中：未当过接收方、可供出机器>0、单机产能>0，按可供出机器数降序。
+- 跨多个源累积腾挪直到覆盖 `need(=vendor_gap_tpm)`；每个源真正能搬的机器数还受其当前空闲 TPM 限制：`movable = min(可供出机器, ⌊源冗余/源单机产能⌋)`，`machines = min(movable, ⌈缺口/目标单机产能⌉)`。
+- **产能非对称计入**（关键）：机器搬到目标集群要按目标模型重部署 ——
+  ```
+  目标集群新增产能 = machines × 目标单机产能(added_tpm)
+  源集群失去产能   = machines × 源单机产能(removed_tpm)
+  ```
+- **集群角色互斥（禁止倒手）**：同一轮内一个集群只能当**供出方**或**接收方**之一，杜绝 A→B→C 的资源倒手（`donors_used` / `receivers_used`）。
+- 腾挪后更新 `cluster_remaining`（源减 `removed_tpm`、目标加 `added_tpm`），产出 `node_move` action，再次 `_allocate_to_existing_cluster`。仍分不到 → 拒收 `self_cluster_capacity_insufficient(_after_node_move)`。
+
+**Step 5 — 记账 `_record_customer_actions`**（每次成功承接）：
+```
+目标自建比例   = min(1, current_self_ratio + allocated / expected_tpm)
+目标自建TPM    = expected_tpm × 目标自建比例
+剩余三方TPM    = expected_tpm − 目标自建TPM
+自建收入       = allocated × 单位自建收入 × 60      # ×60：分钟→小时折算
+三方成本       = 剩余三方TPM × vendor.unit_cost × 60
+本单预期收益   = 自建收入 − 三方成本
+```
+扣减 `vendor_remaining`，产出两个 action：`watermark_adjust`（水位线：自建占比从 `from_self_ratio`→`to_self_ratio`）和 `model_assign`（模型指派）。
+
+**Step 6 — 汇总收益**：`expected_revenue_gain = Σ自建收入 − Σ三方成本`。
+
+### 2.4 约束条件（`_build_constraints`，输出到 `constraints`）
+
+| 约束 | 命中(hit)含义 |
+|---|---|
+| `vendor_capacity_sufficient` | 无因三方不可用被拒 **且** 所有三方剩余额度 ≥0（水位调整后三方能兜住未迁移流量） |
+| `vendor_margin_positive` | 存在候选且未因三方毛利不正被拒（售卖折扣 > 采购折扣、毛利为正） |
+| `self_cluster_capacity_sufficient` | 无客户因自建容量不足被拒 |
+| `model_match_satisfied` | 客户模型能匹配到自建集群/三方 |
+| `node_move_feasible` | 容量不足时能给出可执行的腾挪方案（无 `..._after_node_move` 拒因） |
+| `positive_revenue_gain` | `expected_revenue_gain > 0` |
+
+> 隐含硬约束（体现在流程里，而非仅体检项）：只回收三方部分不超配冗余、专属集群限定、KSCC 最小保留、机器腾挪总量守恒且禁止倒手、三方额度不透支。
+
+### 2.5 输出（`PolicyResult`）
+
+- `expected_revenue_gain` / `expected_peak_shaving_gain`（= 收益）/ `expected_off_peak_gain`（=0）
+- `constraints`：上表 6 项体检。
+- `actions`：`watermark_adjust`、`model_assign`、`node_move` 三类草案（含 `expected_gain`）。
+- `diagnostics`：`candidate_count`、`rejected`（含拒因）、`cluster_remaining_tpm`、`vendor_remaining_tpm`。
+- `summary`：`accepted_customers`（客户、增量自建 TPM、单位收入、兜底三方）、`total_self_tpm_added`、`expected_self_revenue`、`expected_vendor_cost`、`node_moves`、`watermark_changes`。
+
+---
+
+## 3. `time_period` 时段算法
+
+**定位**：看**一整段时间**的拟合业务量曲线，做**一次**机器重分配 + 设定**固定水位线**，最大化自建集群整段的**收入积分**。机器只调一次、全时段固定、按**峰值**定容；机器总量守恒。
+
+### 3.1 输入
+
+与 realtime 相同的 snapshot，但**核心多用 `tpm_series`**（客户日内业务量曲线，如 24 个整点）。集群容量口径改为**满容量** `machine_count × tpm_per_machine`（不是冗余）。前置校验同 realtime。
+
+> 真实运行中 `tpm_series` 由外部合成/拟合（示例见 [run_time_period_on_testdata.py](../run_time_period_on_testdata.py)：以 Excel 的 TPM 为峰值基准，叠加日内 9–21 点高、夜间低的曲线生成 24 点）。
+
+### 3.2 运算逻辑（流程图）
+
+```mermaid
+flowchart TD
+    Start(["输入 PolicyInputSnapshot（核心用 tpm_series）"]) --> V{"校验：需求 / 资源 / 集群非空？"}
+    V -->|否| Err["抛 AlgorithmError"]
+    V -->|是| A["A. 统一时间轴 _timeline<br/>所有客户时间戳并集并排序<br/>（无序列则退化为单点 _flat_）"]
+    A --> B["B. 构造候选 _build_candidates（逐客户）<br/>peak = max(序列)、peak_vendor_gap = peak×(1−self_ratio)"]
+    B --> BF{"过滤"}
+    BF -->|"peak≤0 / 无三方 / 已全自建"| Rej1["拒收"]
+    BF -->|通过| Score["打分：密度优先、must_move 置顶<br/>按 score 降序"]
+    Score --> C["C. 一次机器重分配 _plan_reallocation（逐候选）"]
+    C --> CC{"free ≥ need？<br/>（need = peak_vendor_gap 峰值口径）"}
+    CC -->|否| Acq["_acquire_machines 腾挪机器<br/>总量守恒 / 禁止倒手 / KSCC最小保留<br/>产能非对称：目标按目标速率、源释放按源速率"]
+    CC -->|是| Take{"take = min(need, free) > 0？"}
+    Acq --> Take
+    Take -->|否| Rej2["拒收 self_cluster_capacity_insufficient"]
+    Take -->|是| Accept["记入 committed；客户进 accepted<br/>就地更新 machine_count → machines_after"]
+    Accept --> D["D. 固定水位线 _compute_watermarks（按模型分组）<br/>取系统峰值时点 pk 一次性定容：<br/>① 保底当前自建量 ② 剩余容量按密度回收三方，封顶到峰值"]
+    D --> E["E. 时序积分 _integrate（水位线固定，逐时点）"]
+    E --> Eb["before 基线：self(t) = 需求(t) × 当前自建占比"]
+    E --> Ea["after 调整：self(t) = min(需求(t), 水位线)"]
+    Eb --> Gain["revenue_gain = after.self_revenue − before.self_revenue<br/>（整段收入积分之差，不 ×60）"]
+    Ea --> Gain
+    Gain --> Cons["约束体检（5 项）"]
+    Cons --> Out(["输出 PolicyResult<br/>actions: node_move + watermark_adjust（含逐时点 slots）"])
+```
+
+> **占比随时间变的本质**：水位线固定，只有 `需求(t)` 在变。低谷时需求 < 水位线 → 自建占比≈100%；峰值时需求 > 水位线 → 超出部分溢出到三方。
+
+### 3.3 运算逻辑（分步详解）
+
+**Step A — 统一时间轴 `_timeline`**：所有客户 `tpm_series` 时间戳的**并集**并排序；都没有序列则退化为单点 `["_flat_"]`。`_series_of` 把每个客户对齐到该时间轴（缺失点补 0；无序列则用 `expected_tpm` 铺平）。
+
+**Step B — 构造候选 `_build_candidates`**（逐客户）：
+1. `peak = max(series)`；`peak ≤ 0` → 拒 `non_positive_tpm`。
+2. `best_vendor` 无 → 拒 `vendor_capacity_or_model_unavailable`。
+3. `peak_vendor_gap = peak × (1 − current_self_ratio)`（峰值处待回收的三方量）；≤0 → 拒 `already_fully_self_hosted`。
+4. 打分同 realtime：`(must_move?1e9:0) + unit×1e6 + quality×0.01`。按 score 降序。
+
+**Step C — 一次机器重分配 `_plan_reallocation`**（按峰值定容，总量守恒）：
+- `committed[集群] = 满容量 − current_redundant_tpm`（近似已占用量）；`donatable` = 可供出机器。
+- 逐候选（高密度优先）：
+  - `servable` = 可服务集群；无 → 拒 `no_servable_cluster`。
+  - `free = Σ(满容量 − committed)`（该客户可服务集群的当前空闲）；`need = peak_vendor_gap`。
+  - 若 `free < need`：`_acquire_machines` 从源集群腾挪机器到目标（可服务集群里单机产能最高者），产能非对称计入（目标 `machines×目标速率`、源释放 `machines×源速率`），就地更新 `machine_count`；同样**禁止倒手**（donor/receiver 互斥）、受可供出机器与 KSCC 最小保留约束。
+  - `take = min(need, free)`；`take ≤ 0` → 拒 `self_cluster_capacity_insufficient`。否则把 `take` 记入 `committed`（优先填满已有集群），客户进 `accepted`。
+- 输出 `node_moves`、`accepted`，并就地改好 `clusters` 的 `machine_count`（→ `machines_after`）。
+
+**Step D — 固定水位线 `_compute_watermarks`**（机器调整后一次性设定，此后不变）：
+按模型分组，每组：
+1. `cluster_cap` = 各集群**调整后**满容量。
+2. **系统峰值时点 `pk`** = 该模型所有客户合计需求最大的时刻（水位线在此刻的容量竞争中一次性定死）。
+3. **第一轮保底**：每个客户在 `pk` 的当前自建量 `cur_self = 需求(pk) × current_self_ratio` 先从其可服务集群抽出（不把已在自建的流量赶去三方，顺序无关）。
+4. **第二轮按密度回收**：剩余容量按 `unit_self_revenue` 从高到低，把待回收三方流量分给各客户，封顶到其峰值需求。
+5. `watermark[客户] = 保底 + 回收`（**固定自建 TPM 上限**）。
+
+**Step E — 时序积分 `_integrate`**（水位线固定，跑量随时间变）：
+逐客户、逐时点：
+```
+adjust=True （调整后）：self(t) = min(需求(t), 水位线)
+adjust=False（调整前基线）：self(t) = 需求(t) × current_self_ratio
+vendor(t) = 需求(t) − self(t)
+self_revenue += self(t) × 单位自建收入        # 沿时间轴累加 = 收入积分
+```
+> 注意：**自建占比随时间变化**并非因为水位线动，而是水位线固定、只有 `需求(t)` 在变 —— 低谷时需求低于水位线，自建占比接近 100%；峰值时需求超过水位线，超出部分溢出到三方。
+> `revenue_gain = after.self_revenue − before.self_revenue`（整段收入积分之差；此处**不 ×60**，是沿时间轴的积分求和）。
+
+### 3.4 约束条件（`_build_constraints`）
+
+| 约束 | 命中含义 |
+|---|---|
+| `peak_capacity_sufficient` | 无客户因自建容量不足被拒（自建已按峰值定容，峰值需求可被自建+三方覆盖） |
+| `vendor_margin_positive` | 存在候选（三方承接部分售卖折扣 > 采购折扣） |
+| `high_value_moved_to_self` | 至少有优质客户被挪到自建承接（`len(accepted) > 0`） |
+| `machines_conserved` | `Σmachines_before == Σmachines_after`（机器总量守恒） |
+| `positive_revenue_gain` | `revenue_gain > 0` |
+
+### 3.5 输出（`PolicyResult`）
+
+- `expected_revenue_gain` / `expected_peak_shaving_gain`（= 收益）/ `expected_off_peak_gain`（=0）
+- `constraints`：上表 5 项。
+- `actions`：`node_move`（机器腾挪）+ `watermark_adjust`（每客户固定水位线，payload 含逐时点 `slots`：`ts / tpm / self_ratio / self_tpm / vendor_tpm`）。
+- `diagnostics`：`timeline_points`、`candidate_count`、`rejected`、`machines_before`、`machines_after`、`model_self_capacity`。
+- `summary`：`accepted_customers`、`node_moves`、`watermark_changes`（含 slots）、`self_revenue_before/after`、`expected_revenue_gain`、`self_tpm_integral_before/after`、`machines_total_before/after`。
+
+---
+
+## 4. 两算法对照速查
+
+| 维度 | `realtime` | `time_period` |
+|---|---|---|
+| **输入焦点** | 单点标量（`expected_tpm`、冗余 TPM） | 时序曲线（`tpm_series`）、满容量 |
+| **自建容量** | `current_redundant_tpm`（冗余） | `machine_count × tpm_per_machine`（满容量，按峰值定容） |
+| **可回收量** | `expected_tpm × (1−self_ratio)` | `peak × (1−self_ratio)`（峰值口径） |
+| **排序键** | must_move → 收入密度 → 质量分 | 同左 |
+| **机器调整** | 临时腾挪补冗余，禁止倒手 | 一次重分配，全时段固定，禁止倒手 |
+| **水位线** | 每次分配即时确定 | 一次性设定，时段内固定 |
+| **收益口径** | 单点：`Σ(自建收入−三方成本)`，×60 折算小时 | 整段：`after − before` 收入积分（不 ×60） |
+| **机器守恒** | 是（挪闲置机器） | 是（集群间重分配） |
+| **专属集群/KSCC 保留** | 遵守 | 遵守 |
+| **动作类型** | `watermark_adjust`+`model_assign`+`node_move` | `node_move`+`watermark_adjust`(带 slots) |
+| **典型场景** | “此刻”实时调度，快速止损/抢收益 | 制定一整天的固定调度方案 |
+
+### 共同的设计原则（两算法一致）
+1. **收入密度优先的分数背包**：自建 TPM 有限、机器成本固定时，最大化自建收入 = 按“单位 TPM 自建收入”从高到低填满容量。
+2. **must_move 止损置顶**：售卖折扣 ≤ 采购折扣的客户留在三方是亏的，优先全挪自建（自建边际成本≈0）。
+3. **只回收三方部分**：不动已在自建的量，不超配容量、不虚增收益。
+4. **机器总量守恒 + 禁止倒手**：机器只在集群间搬，且同一集群一轮内不能既供出又接收。
+5. **产能非对称计入**：机器搬到目标集群按目标模型单机能力计新增，源集群按自身单机能力计释放。
+6. **专属集群与最小保留**：`KSCC`/`XISHANJU` 只服务对应客户；`KSCC` 至少保留 2 台。
