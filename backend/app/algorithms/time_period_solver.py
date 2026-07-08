@@ -13,6 +13,9 @@ from .base import (
     PolicyResult,
 )
 
+# 浮点护栏：容量求和会有残差，用它判断“缺口是否已实质填满 / 是否还有可分配容量”。
+EPS = 1e-6
+
 
 @dataclass
 class _Candidate:
@@ -97,6 +100,11 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 "machines_before": machines_before,
                 "machines_after": machines_after,
                 "model_self_capacity": model_self_capacity,
+                # 预警：三方侧亏损（售卖折扣<=采购折扣）的客户，供人工关注是否手动全挪自建
+                "must_move_customers": [
+                    {"report_id": c.demand.report_id, "customer_code": c.demand.customer_code}
+                    for c in candidates if c.must_move
+                ],
             },
             summary={
                 "accepted_customers": [self._accepted_row(c) for c in accepted],
@@ -147,8 +155,8 @@ class TimePeriodSolver(SolverEconomicsMixin):
             if peak_vendor_gap <= 0:
                 rejected.append(self._reject(demand, "already_fully_self_hosted"))
                 continue
-            # 密度优先（M1）：单位自建收入为主键；must_move 置顶
-            score = (1e9 if must_move else 0.0) + unit * 1e6 + max(demand.quality_score, 0) * 0.01
+            # 密度优先：单位自建收入为唯一排序键；must_move 仅作诊断预警，不再置顶，质量分不参与
+            score = unit
             candidates.append(_Candidate(
                 demand=demand, unit_self_revenue=unit, best_vendor=vendor,
                 purchase_discount=purchase_discount, must_move=must_move,
@@ -167,27 +175,27 @@ class TimePeriodSolver(SolverEconomicsMixin):
     def _servable_clusters(self, demand: DemandSnapshotItem, clusters: list[dict]) -> list[dict]:
         return self._matching_clusters(demand.model_name, clusters, demand.customer_code)
 
-    def _cluster_committed(self, clusters: list[dict]) -> dict[str, float]:
-        """每集群当前已被本集群主要客户占用的自建量（用于判断可释放余量）。
-        近似：用 current_redundant_tpm 表示空闲，committed = 容量 - 冗余。"""
-        committed = {}
-        for c in clusters:
-            cap = float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
-            redundant = max(float(c.get("current_redundant_tpm", 0) or 0), 0.0)
-            committed[c["cluster_name"]] = max(cap - redundant, 0.0)
-        return committed
-
     def _plan_reallocation(self, candidates, clusters, rejected):
         """按峰值给高密度客户配齐自建容量；不足则在集群间腾挪机器（总量守恒）。
-        就地更新 clusters 的 machine_count；返回 (node_moves, accepted, rejected)。"""
+        就地更新 clusters 的 machine_count；返回 (node_moves, accepted, rejected)。
+
+        冗余分账（与 realtime 一致）：native_free = 集群「原生」空闲容量（可被 commit 消耗，也可
+        背书供出机器）；received_free = 腾挪「接收」到的容量（只可被 commit 消耗，永不背书供出）。
+        供出上限只看 native_free，杜绝“原生容量已被占用却靠接收余量供出已占用机器”的重复占用，
+        从而可安全允许集群既供又收（A→B & C→A），无需 donor/receiver 互斥。"""
         by_name = {c["cluster_name"]: c for c in clusters}
-        committed = self._cluster_committed(clusters)
-        # 每集群可供出机器数（空闲机器，受最小保留约束）
+        native_free = {
+            c["cluster_name"]: max(float(c.get("current_redundant_tpm", 0) or 0), 0.0)
+            for c in clusters
+        }
+        received_free = {c["cluster_name"]: 0.0 for c in clusters}
         donatable = {c["cluster_name"]: self._donatable_machines(c) for c in clusters}
-        donors_used: set[str] = set()
-        receivers_used: set[str] = set()
         node_moves: list[dict] = []
         accepted: list[_Candidate] = []
+
+        def servable_free(servable):
+            return sum(native_free.get(c["cluster_name"], 0.0) + received_free.get(c["cluster_name"], 0.0)
+                       for c in servable)
 
         for cand in candidates:
             demand = cand.demand
@@ -195,49 +203,41 @@ class TimePeriodSolver(SolverEconomicsMixin):
             if not servable:
                 rejected.append(self._reject(demand, "no_servable_cluster"))
                 continue
-            # 该客户在其可服务集群上的当前空闲容量
-            free = sum(max(float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
-                           - committed.get(c["cluster_name"], 0.0), 0.0) for c in servable)
+            free = servable_free(servable)
             need = cand.peak_vendor_gap  # 峰值处要回收的量
 
-            if free < need:
-                moves = self._acquire_machines(
-                    demand, need - free, servable, clusters, by_name,
-                    donatable, donors_used, receivers_used,
-                )
+            if need - free > EPS:
+                moves = self._acquire_machines(demand, need - free, servable, clusters, donatable, native_free)
                 for mv in moves:
                     src, tgt = mv["from_cluster"], mv["to_cluster"]
                     by_name[src]["machine_count"] -= mv["machine_count"]
                     by_name[tgt]["machine_count"] += mv["machine_count"]
                     donatable[src] -= mv["machine_count"]
-                    donors_used.add(src)
-                    receivers_used.add(tgt)
-                    committed[src] = committed.get(src, 0.0)  # 源已提交量不变（挪的是空闲机器）
-                    free += mv["added_tpm"]
+                    native_free[src] = native_free.get(src, 0.0) - mv["removed_tpm"]     # 源失去原生空闲
+                    received_free[tgt] = received_free.get(tgt, 0.0) + mv["added_tpm"]    # 目标获得接收容量
                     node_moves.append(mv)
+                free = servable_free(servable)
 
             take = min(need, free)
-            if take <= 0:
+            if take <= EPS:
                 rejected.append(self._reject(demand, "self_cluster_capacity_insufficient"))
                 continue
-            # 记账：把 take 计入该客户可服务集群的 committed（优先填满已有集群）
-            self._commit(servable, committed, take)
+            # 记账：把 take 从可服务集群扣减（先扣 received 再扣 native，把原生容量尽量留作可供出）
+            self._commit(servable, native_free, received_free, take)
             accepted.append(cand)
 
         return node_moves, accepted, rejected
 
-    def _acquire_machines(self, demand, shortfall_tpm, servable, clusters, by_name,
-                          donatable, donors_used, receivers_used) -> list[dict]:
-        """为承接 demand 腾挪机器到其可服务集群中单机能力最高者。目标速率计产能，源速率释放。"""
-        targets = [c for c in servable if c["cluster_name"] not in donors_used
-                   and float(c.get("tpm_per_machine", 0) or 0) > 0]
+    def _acquire_machines(self, demand, shortfall_tpm, servable, clusters, donatable, native_free) -> list[dict]:
+        """为承接 demand 腾挪机器到其可服务集群中单机能力最高者。目标速率计产能，源速率释放。
+        无需 donor/receiver 互斥：接收容量进 received_free、永不背书供出，真 relay 结构上不可能。"""
+        targets = [c for c in servable if float(c.get("tpm_per_machine", 0) or 0) > 0]
         if not targets:
             return []
         target = max(targets, key=lambda c: float(c.get("tpm_per_machine", 0) or 0))
         target_rate = float(target.get("tpm_per_machine", 0) or 0)
         sources = [c for c in clusters
                    if c["cluster_name"] != target["cluster_name"]
-                   and c["cluster_name"] not in receivers_used
                    and donatable.get(c["cluster_name"], 0) > 0
                    and float(c.get("tpm_per_machine", 0) or 0) > 0]
         sources.sort(key=lambda c: donatable.get(c["cluster_name"], 0), reverse=True)
@@ -249,7 +249,9 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 break
             name = src["cluster_name"]
             src_rate = float(src.get("tpm_per_machine", 0) or 0)
-            movable = donatable.get(name, 0)
+            # 安全护栏：可搬走台数受源集群仍空闲的【原生】容量限制，只有 native_free 背书的机器可供出。
+            # （旧版仅用 donatable 台数、无容量护栏，存在 commit-then-donate 的容量重复占用。）
+            movable = min(donatable.get(name, 0), int((native_free.get(name, 0.0) + EPS) // src_rate))
             if movable <= 0:
                 continue
             need_machines = max(1, ceil((shortfall_tpm - added) / target_rate))
@@ -266,17 +268,21 @@ class TimePeriodSolver(SolverEconomicsMixin):
             added += machines * target_rate
         return moves
 
-    def _commit(self, servable, committed, amount):
+    def _commit(self, servable, native_free, received_free, amount):
         remaining = amount
         for c in servable:
-            if remaining <= 0:
+            if remaining <= EPS:
                 break
             name = c["cluster_name"]
-            cap = float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
-            free = max(cap - committed.get(name, 0.0), 0.0)
-            put = min(free, remaining)
-            committed[name] = committed.get(name, 0.0) + put
-            remaining -= put
+            # 先扣 received 再扣 native：把原生容量尽量留作可供出（与 realtime 一致）。
+            take_recv = min(remaining, received_free.get(name, 0.0))
+            received_free[name] = received_free.get(name, 0.0) - take_recv
+            remaining -= take_recv
+            if remaining <= EPS:
+                break
+            take_nat = min(remaining, native_free.get(name, 0.0))
+            native_free[name] = native_free.get(name, 0.0) - take_nat
+            remaining -= take_nat
 
     # ---------------- D. 固定水位线 + 时序积分 ----------------
     def _compute_watermarks(self, accepted, clusters, timeline) -> dict[str, float]:

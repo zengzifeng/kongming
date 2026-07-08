@@ -19,8 +19,7 @@ def build_snapshot(algorithm: str, demands: list[Demand], params: dict | None = 
 
     params = params or {}
     demand_params = params.get("demands", {})
-    default_input_ratio = float(params.get("default_input_ratio", 0.5))
-    default_output_ratio = float(params.get("default_output_ratio", 0.5))
+    default_input_ratio = float(params.get("default_input_ratio", 1.0))
 
     demand_items = []
     for d in demands:
@@ -33,7 +32,6 @@ def build_snapshot(algorithm: str, demands: list[Demand], params: dict | None = 
             expected_rpm=float(d.expected_rpm or 0),
             discount_rate=float(d.discount_rate or 1.0),
             input_ratio=float(overrides.get("input_ratio", default_input_ratio)),
-            output_ratio=float(overrides.get("output_ratio", default_output_ratio)),
             cache_hit_rate=float(overrides.get("cache_hit_rate", params.get("default_cache_hit_rate", 0.0))),
             current_self_ratio=float(overrides.get("current_self_ratio", 0.0)),
             current_vendor_ratios=dict(overrides.get("current_vendor_ratios", {})),

@@ -13,8 +13,7 @@ class DemandSnapshotItem:
     expected_tpm: float
     expected_rpm: float
     discount_rate: float
-    input_ratio: float = 0.5
-    output_ratio: float = 0.5
+    input_ratio: float = 1.0  # 输入:输出 token 比值，如 3 表示 3:1；输出基准恒为 1
     cache_hit_rate: float = 0.0
     current_self_ratio: float = 0.0
     current_vendor_ratios: dict[str, float] = field(default_factory=dict)

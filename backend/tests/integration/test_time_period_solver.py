@@ -40,7 +40,7 @@ def _demand(report_id, customer, model="qwen2.5-72b", peak=100_000, discount=0.8
     return DemandSnapshotItem(
         report_id=report_id, customer_code=customer, model_name=model,
         expected_tpm=peak, expected_rpm=100, discount_rate=discount,
-        input_ratio=0.6, output_ratio=0.4, cache_hit_rate=0.3,
+        input_ratio=1.5, cache_hit_rate=0.3,
         current_self_ratio=self_ratio, current_vendor_ratios={"aliyun": 1 - self_ratio},
         tpm_series=_series(peak),
     )
@@ -102,7 +102,7 @@ def test_time_period_dedicated_cluster_and_reserve_carried_over():
     snap = _snapshot([
         DemandSnapshotItem(report_id="vip", customer_code="vip", model_name="glm",
                            expected_tpm=300_000, expected_rpm=0, discount_rate=0.9,
-                           input_ratio=0.5, output_ratio=0.5, cache_hit_rate=0.3,
+                           input_ratio=1.0, cache_hit_rate=0.3,
                            current_self_ratio=0.0, current_vendor_ratios={"v": 1.0},
                            tpm_series=_series(300_000)),
     ], clusters=clusters, vendors=vendors, params=params)
@@ -111,3 +111,83 @@ def test_time_period_dedicated_cluster_and_reserve_carried_over():
     assert after["GLM-KSCC"] >= 2  # KSCC 至少保留 2 台
     # vip 不能占用 KSCC(专属 kscc) 容量：其 self 完全来自 GLM-main + 腾挪
     assert result.summary["machines_total_before"] == result.summary["machines_total_after"]
+
+
+# ---- 原生/接收冗余分账 的回归用例 ----
+
+def _multi_snapshot(demands, clusters, models, vendor_quota=9_000_000):
+    vendors = [{"vendor": "tp", "model": m, "quota_tpm": vendor_quota,
+                "unit_cost": 0.0002, "unit_price": 0.0010} for m in models]
+    prices = {m: {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.0010,
+                  "output_price": 0.0010} for m in models}
+    return _snapshot(demands, clusters=clusters, vendors=vendors, params={"model_prices": prices})
+
+
+def _tp_dem(report_id, model, peak, discount, self_ratio=0.0):
+    return DemandSnapshotItem(
+        report_id=report_id, customer_code=report_id, model_name=model,
+        expected_tpm=peak, expected_rpm=0, discount_rate=discount,
+        input_ratio=1.0, cache_hit_rate=0.0, current_self_ratio=self_ratio,
+        current_vendor_ratios={"tp": max(1 - self_ratio, 0.0)}, tpm_series=_series(peak),
+    )
+
+
+def _tp_cl(name, model, rate, redundant_tpm, redundant_machines, machine_count=4):
+    return {"cluster_name": name, "deployed_model": model, "machine_count": machine_count,
+            "tpm_per_machine": rate, "current_redundant_tpm": redundant_tpm,
+            "current_redundant_machines": redundant_machines}
+
+
+def test_time_period_no_double_count_same_model_donor():
+    # 双重计数修复：两个同模型集群都可服务某客户（其冗余已计入 free），其中一个又有可供出机器。
+    # 旧代码把该集群冗余既算作 servable free、又算作腾挪新增（free += added）→ 虚增容量。
+    # 新代码腾挪后重算 free（native 扣、received 加）得净零，自建合计不得超过真实物理容量。
+    clusters = [
+        _tp_cl("glm-A", "glm", 50_000, 200_000, 0),  # 全空闲，无可供机器
+        _tp_cl("glm-B", "glm", 50_000, 200_000, 4),  # 全空闲，4 台可供
+    ]
+    # 需求 500k > 真实物理空闲合计 400k
+    result = TimePeriodSolver().solve(_multi_snapshot(
+        [_tp_dem("big", "glm", 500_000, 0.9)], clusters, ["glm"]))
+    wms = result.summary["watermark_changes"]
+    cap = 2 * 4 * 50_000  # 两簇满容量合计 = 400k（机器守恒，总容量不变）
+    n = len(wms[0]["slots"])
+    for ti in range(n):
+        total_self = sum(w["slots"][ti]["self_tpm"] for w in wms)
+        assert total_self <= cap + 1e-6  # 无虚增：自建合计不超过真实物理容量
+
+
+def test_time_period_allows_donor_to_also_receive():
+    # 倒手放开：glm-A 先把唯一空闲机器供给高密度 modelB 客户(A→B)，
+    # 随后 glm-A 自己的 modelA 客户靠 clC→A 承接。旧 donor/receiver 互斥会阻断。
+    clusters = [
+        _tp_cl("clA", "modelA", 50_000, 50_000, 1),
+        _tp_cl("clB", "modelB", 50_000, 0, 0),
+        _tp_cl("clC", "modelC", 50_000, 50_000, 1),
+    ]
+    result = TimePeriodSolver().solve(_multi_snapshot([
+        _tp_dem("hd_B", "modelB", 50_000, 0.9),
+        _tp_dem("own_A", "modelA", 50_000, 0.5),
+    ], clusters, ["modelA", "modelB", "modelC"]))
+    accepted = {a["report_id"] for a in result.summary["accepted_customers"]}
+    moves = result.summary["node_moves"]
+    froms = {m["from_cluster"] for m in moves}
+    tos = {m["to_cluster"] for m in moves}
+    assert "hd_B" in accepted and "own_A" in accepted
+    assert "clA" in froms and "clA" in tos  # clA 既供出又接收
+
+
+def test_time_period_commit_then_donate_blocked():
+    # 分账安全：高密度客户先 commit 吃空 clA 的原生冗余后，clA 虽仍有 donatable 机器，
+    # 但 native_free=0 → 不得被当作源供出（movable=min(donatable, native_free//rate)=0）。
+    clusters = [
+        _tp_cl("clA", "modelA", 50_000, 100_000, 2),  # 2 台原生空闲
+        _tp_cl("clC", "modelC", 50_000, 0, 0),         # 跨模型客户本集群无冗余
+    ]
+    result = TimePeriodSolver().solve(_multi_snapshot([
+        _tp_dem("drain_A", "modelA", 100_000, 0.9),   # 高密度，先吃空 clA 原生冗余
+        _tp_dem("wants_C", "modelC", 100_000, 0.5),   # 想从 clA 腾挪，但 clA 已被占用
+    ], clusters, ["modelA", "modelC"]))
+    froms = {m["from_cluster"] for m in result.summary["node_moves"]}
+    assert "clA" not in froms  # clA 原生已被 commit 占用，不得再供出
+

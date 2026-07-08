@@ -19,14 +19,14 @@ class SolverEconomicsMixin:
         input_hit_price = float(price.get("input_cache_hit_price", fallback_unit_price * 0.2) or 0)
         input_miss_price = float(price.get("input_cache_miss_price", fallback_unit_price) or 0)
         output_price = float(price.get("output_price", fallback_unit_price) or 0)
-        input_ratio = max(demand.input_ratio, 0)
-        output_ratio = max(demand.output_ratio, 0)
-        total_ratio = input_ratio + output_ratio
-        if total_ratio <= 0:
-            input_ratio = output_ratio = 0.5
-            total_ratio = 1.0
-        input_share = input_ratio / total_ratio
-        output_share = output_ratio / total_ratio
+        # input_ratio 是「输入:输出」token 比值（如 3 = 3:1），输出基准恒为 1。
+        # 故输入份额 = io/(io+1)，输出份额 = 1/(io+1)；io<=0 时退化为 1:1（各 0.5）。
+        io = max(demand.input_ratio, 0)
+        if io <= 0:
+            io = 1.0
+        denom = io + 1.0
+        input_share = io / denom
+        output_share = 1.0 / denom
         cache_hit_rate = min(max(demand.cache_hit_rate, 0), 1)
         unit_price = (
             input_share * cache_hit_rate * input_hit_price
