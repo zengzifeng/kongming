@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, ForeignKey, Numeric, Index
+from sqlalchemy import JSON, String, ForeignKey, Numeric, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import BaseModel
@@ -42,6 +42,15 @@ class Demand(BaseModel):
     expected_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     expected_rpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     discount_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=1.0)
+    # 实跑量表字段：供 realtime / time_period 求解器直接消费（此前只存在于内存 DemandSnapshotItem，靠 params 注入）。
+    # current_self_ratio  : 主要承接客户自建分发占比 [0,1]
+    # current_vendor_ratios: 主要承接客户三方分发占比，{vendor_key: ratio}，与自建占比互补
+    # input_ratio         : 输入:输出 token 比值（如 3 表示 3:1），输出基准恒为 1
+    # cache_hit_rate      : 缓存命中率 [0,1]，用于加权命中/未命中输入价
+    current_self_ratio: Mapped[float] = mapped_column(Numeric(6, 4), default=0)
+    current_vendor_ratios: Mapped[dict] = mapped_column(JSON, default=dict)
+    input_ratio: Mapped[float] = mapped_column(Numeric(10, 4), default=1.0)
+    cache_hit_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0)
     expected_start_at: Mapped[datetime | None] = mapped_column()
     expected_end_at: Mapped[datetime | None] = mapped_column()
     status: Mapped[str] = mapped_column(String(32), default=DemandStatus.PENDING, nullable=False, index=True)

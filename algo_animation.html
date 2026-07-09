@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>调度算法 · 分步动画</title>
+<style>
+  :root{
+    --surface-1:#fcfcfb;--page:#f9f9f7;--text-primary:#0b0b0b;--text-secondary:#52514e;--muted:#898781;
+    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,0.10);
+    --self:#2a78d6;--vendor:#eb6834;--recv:#1baf7a;--wm:#0b0b0b;--good:#006300;--hi:#eda100;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --surface-1:#1a1a19;--page:#0d0d0d;--text-primary:#fff;--text-secondary:#c3c2b7;--muted:#898781;
+    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,0.10);
+    --self:#3987e5;--vendor:#d95926;--recv:#199e70;--wm:#fff;--good:#0ca30c;--hi:#c98500;}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--text-primary);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px}
+  .wrap{max-width:1080px;margin:0 auto;padding:24px 20px 60px}
+  h1{font-size:22px;margin:0 0 16px}
+  .tabs{display:flex;gap:8px;margin:0 0 18px}
+  .tab{padding:8px 16px;border:1px solid var(--border);border-radius:9px;background:var(--surface-1);cursor:pointer;font:inherit}
+  .tab.on{background:var(--self);color:#fff;border-color:transparent}
+  .panel{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin:0 0 16px}
+  .ctl{display:flex;gap:8px;align-items:center;margin:0 0 14px;flex-wrap:wrap}
+  .ctl button{padding:7px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-1);color:var(--text-primary);cursor:pointer;font:inherit}
+  .ctl button.pri{background:var(--self);color:#fff;border-color:transparent;min-width:84px}
+  .ctl .prog{color:var(--muted);font-variant-numeric:tabular-nums;margin-left:auto}
+  .narr{min-height:44px;background:var(--page);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin:0 0 14px;font-size:14px;line-height:1.45}
+  .narr b{color:var(--self)}
+  .capbar{height:22px;border-radius:6px;background:var(--grid);overflow:hidden;position:relative;margin:6px 0 2px}
+  .capbar > i{display:block;height:100%;background:var(--self);transition:width .5s ease}
+  .caplbl{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .card{border:1px solid var(--border);border-radius:11px;padding:10px 10px 4px;transition:box-shadow .2s,border-color .2s}
+  .card.act{border-color:var(--self);box-shadow:0 0 0 2px var(--self)}
+  .card .cn{font-weight:600;margin:0 2px}
+  .card .cmeta{color:var(--muted);font-size:11px;margin:0 2px 4px;font-variant-numeric:tabular-nums}
+  .marg{font-size:11px;font-variant-numeric:tabular-nums;margin:2px 2px 0;color:var(--text-secondary)}
+  .marg.best{color:var(--self);font-weight:700}
+  svg{display:block;width:100%;height:auto;overflow:visible}
+  .axlbl{fill:var(--muted);font-size:9px}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--text-secondary);font-size:12px;margin:14px 0 0}
+  .legend .it{display:flex;align-items:center;gap:6px}
+  .sw{width:14px;height:11px;border-radius:3px}
+  .rt-cl{display:flex;gap:18px;margin:0 0 12px;flex-wrap:wrap}
+  .rt-cl .box{border:1px solid var(--border);border-radius:10px;padding:10px 14px;min-width:180px}
+  .rt-cl .t{font-weight:600;margin-bottom:6px}
+  .bar{height:16px;border-radius:5px;background:var(--grid);overflow:hidden;margin:3px 0}
+  .bar>i{display:block;height:100%;transition:width .5s ease}
+  .rt-cand{display:flex;gap:12px;margin:0 0 14px}
+  .rt-cand .c{flex:1;border:1px solid var(--border);border-radius:10px;padding:10px 12px;transition:box-shadow .2s,border-color .2s}
+  .rt-cand .c.act{border-color:var(--self);box-shadow:0 0 0 2px var(--self)}
+  .rt-cand .c.done{opacity:.55}
+  .kk{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .val{font-variant-numeric:tabular-nums;font-weight:600}
+  .hide{display:none}
+</style></head><body><div class="wrap">
+<h1>调度算法 · 分步动画</h1>
+<div class="tabs">
+  <button class="tab on" data-t="tp">time_period（机器重分配 + 水位注水）</button>
+  <button class="tab" data-t="rt">realtime（统一单趟）</button>
+</div>
+
+<!-- ===== TIME_PERIOD ===== -->
+<div id="view-tp">
+  <div class="panel">
+    <div class="ctl">
+      <button class="pri" id="tp-play">▶ 播放</button>
+      <button id="tp-step">下一步 ›</button>
+      <button id="tp-reset">⟲ 重置</button>
+      <span class="prog" id="tp-prog"></span>
+    </div>
+    <div class="narr" id="tp-narr"></div>
+    <div style="font-size:12px;color:var(--muted);margin:0 0 4px">集群机器（跨模型重分配：把空闲机器重部署给缺容量的模型）</div>
+    <div class="rt-cl" id="tp-clusters" style="margin-bottom:14px"></div>
+    <div class="caplbl" id="tp-caplbl"></div>
+    <div class="capbar"><i id="tp-cap"></i></div>
+    <div style="font-size:12px;color:var(--muted);margin:8px 0 4px">客户水位线（共享池内按边际收入注水，任意客户流量可跑在任意 glm 集群）</div>
+    <div class="cards" id="tp-cards"></div>
+    <div class="legend">
+      <span class="it"><span class="sw" style="background:var(--self)"></span>自建（水位以下）</span>
+      <span class="it"><span class="sw" style="background:var(--muted);opacity:.35"></span>需求（水位以上=溢三方）</span>
+      <span class="it"><span class="sw" style="background:transparent;border-top:2px dashed var(--wm);height:0"></span>水位线</span>
+      <span class="it"><span class="sw" style="background:var(--hi)"></span>集群空闲机器</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== REALTIME ===== -->
+<div id="view-rt" class="hide">
+  <div class="panel">
+    <div class="ctl">
+      <button class="pri" id="rt-play">▶ 播放</button>
+      <button id="rt-step">下一步 ›</button>
+      <button id="rt-reset">⟲ 重置</button>
+      <span class="prog" id="rt-prog"></span>
+    </div>
+    <div class="narr" id="rt-narr"></div>
+    <div class="rt-cand" id="rt-cands"></div>
+    <div class="rt-cl" id="rt-clusters"></div>
+    <div class="legend">
+      <span class="it"><span class="sw" style="background:var(--self)"></span>原生冗余 native</span>
+      <span class="it"><span class="sw" style="background:var(--recv)"></span>接收容量 received（不可再供出）</span>
+      <span class="it"><span class="sw" style="background:var(--hi)"></span>空闲机器</span>
+    </div>
+  </div>
+</div>
+
+<div class="tt"></div>
+<script>
+const TP = {"clusters": [{"id": "glm-main", "model": "glm", "rate": 50000, "machines0": 2, "machines1": 5}, {"id": "kimi-c", "model": "kimi", "rate": 50000, "machines0": 4, "machines1": 1}], "models": ["glm", "kimi"], "model_caps": {"glm": 250000, "kimi": 50000}, "customers": [{"id": "spike-co", "model": "glm", "density": 0.00095, "peak": 300000.0, "self_ratio": 0.0, "series": [40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 300000.0, 300000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0]}, {"id": "flat-co", "model": "glm", "density": 0.0007, "peak": 120000.0, "self_ratio": 0.3, "series": [120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0, 120000.0]}, {"id": "kimi-low", "model": "kimi", "density": 0.0005, "peak": 40000.0, "self_ratio": 0.0, "series": [40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0, 40000.0]}], "trace": [{"phase": "move", "from": "kimi-c", "to": "glm-main", "machines": 3, "from_rate": 50000.0, "to_rate": 50000.0, "added": 150000.0, "removed": 150000.0, "reason": "承接优质客户 spike-co（每机器面积 931 > 源机会成本）"}, {"phase": "fill", "model": "glm", "cand": "spike-co", "marg": {"spike-co": 0.0228, "flat-co": 0.0168}, "time_above": 24, "from": 0.0, "to": 40000.0, "want": 40000.0, "got": 40000.0, "cap_left": 210000.0, "model_cap": 250000, "capped": false, "level": {"spike-co": 40000.0, "flat-co": 0.0, "kimi-low": 0.0}}, {"phase": "fill", "model": "glm", "cand": "flat-co", "marg": {"spike-co": 0.0019, "flat-co": 0.0168}, "time_above": 24, "from": 0.0, "to": 120000.0, "want": 120000.0, "got": 120000.0, "cap_left": 90000.0, "model_cap": 250000, "capped": true, "level": {"spike-co": 40000.0, "flat-co": 120000.0, "kimi-low": 0.0}}, {"phase": "fill", "model": "glm", "cand": "spike-co", "marg": {"spike-co": 0.0019, "flat-co": 0.0}, "time_above": 2, "from": 40000.0, "to": 130000.0, "want": 260000.0, "got": 90000.0, "cap_left": 0.0, "model_cap": 250000, "capped": true, "level": {"spike-co": 130000.0, "flat-co": 120000.0, "kimi-low": 0.0}}, {"phase": "fill", "model": "kimi", "cand": "kimi-low", "marg": {"kimi-low": 0.012}, "time_above": 24, "from": 0.0, "to": 40000.0, "want": 40000.0, "got": 40000.0, "cap_left": 10000.0, "model_cap": 50000, "capped": true, "level": {"spike-co": 130000.0, "flat-co": 120000.0, "kimi-low": 40000.0}}], "final_wm": {"spike-co": 130000.0, "flat-co": 120000.0, "kimi-low": 40000.0}}, RT = {"clusters": [{"id": "glm-main", "model": "glm", "rate": 50000, "native0": 60000, "machines0": 4, "idle0": 0}, {"id": "donor", "model": "kimi", "rate": 50000, "native0": 150000, "machines0": 3, "idle0": 3}], "candidates": [{"id": "A-hi", "density": 0.00095, "gap": 120000}, {"id": "B-mid", "density": 0.0006, "gap": 80000}], "trace": [{"cand": "A-hi", "density": 0.00095, "gap": 120000, "existing": 60000.0, "native_after": {"glm-main": 0.0, "donor": 150000}, "moves": [{"from": "donor", "to": "glm-main", "machines": 2, "added": 100000, "removed": 100000}], "allocated": 120000.0, "to_self_ratio": 1.0, "native": {"glm-main": 0.0, "donor": 50000}, "received": {"glm-main": 40000.0, "donor": 0.0}, "extra": {"glm-main": 0, "donor": 1}}, {"cand": "B-mid", "density": 0.0006, "gap": 80000, "existing": 40000.0, "native_after": {"glm-main": 0.0, "donor": 50000}, "moves": [{"from": "donor", "to": "glm-main", "machines": 1, "added": 50000, "removed": 50000}], "allocated": 80000.0, "to_self_ratio": 1.0, "native": {"glm-main": 0.0, "donor": 0}, "received": {"glm-main": 10000.0, "donor": 0.0}, "extra": {"glm-main": 0, "donor": 0}}]};
+const NS="http://www.w3.org/2000/svg";
+const fk=v=>(v/1000).toLocaleString(undefined,{maximumFractionDigits:0})+"k";
+const E=(t,a,p)=>{const e=document.createElementNS(NS,t);for(const k in(a||{}))e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;};
+const D=(c,h,p)=>{const d=document.createElement(c.tag||"div");if(c.c)d.className=c.c;if(h!=null)d.innerHTML=h;if(p)p.appendChild(d);return d;};
+
+/* ---------- TIME_PERIOD ---------- */
+(function(){
+  const W=260,Hh=130,M={l:30,r:8,t:8,b:16};
+  const iw=W-M.l-M.r, ih=Hh-M.t-M.b;
+  const cardEls={};
+  const cardsWrap=document.getElementById("tp-cards");
+  TP.customers.forEach(c=>{
+    const card=D({c:"card"},null,cardsWrap); card.id="tpc-"+c.id;
+    D({c:"cn"}, `${c.id} <span style="font-size:11px;color:var(--recv);font-weight:600">[${c.model}]</span>`, card);
+    D({c:"cmeta"},`密度 ${(c.density*1000).toFixed(3)}/k · 峰值 ${fk(c.peak)} · 当前自建比 ${c.self_ratio}`,card);
+    const marg=D({c:"marg"},"边际收入 —",card);
+    const yMax=c.peak*1.06;
+    const svg=E("svg",{viewBox:`0 0 ${W} ${Hh}`},card);
+    const x=h=>M.l+h/23*iw, y=v=>M.t+ih-v/yMax*ih;
+    for(let k=0;k<=2;k++){const val=yMax*k/2,yy=y(val);
+      E("line",{x1:M.l,y1:yy,x2:W-M.r,y2:yy,stroke:"var(--grid)","stroke-width":1},svg);
+      const t=E("text",{x:M.l-4,y:yy+3,"text-anchor":"end",class:"axlbl"},svg);t.textContent=fk(val);}
+    const clipId="clip-"+c.id;
+    const cp=E("clipPath",{id:clipId},svg);
+    let dp="M "+x(0)+" "+y(0);
+    for(let h=0;h<24;h++)dp+=" L "+x(h)+" "+y(c.series[h]);
+    dp+=" L "+x(23)+" "+y(0)+" Z";
+    E("path",{d:dp},cp);
+    E("path",{d:dp,fill:"var(--muted)","fill-opacity":0.18},svg);
+    const water=E("rect",{x:M.l,y:y(0),width:iw,height:0,fill:"var(--self)","fill-opacity":0.9,"clip-path":`url(#${clipId})`},svg);
+    water.style.transition="y .55s ease,height .55s ease";
+    const wl=E("line",{x1:M.l,y1:y(0),x2:W-M.r,y2:y(0),stroke:"var(--wm)","stroke-width":2,"stroke-dasharray":"4 3","stroke-opacity":0.8},svg);
+    wl.style.transition="y1 .55s ease,y2 .55s ease";
+    const wlab=E("text",{x:W-M.r,y:y(0)-3,"text-anchor":"end",class:"axlbl","font-weight":700,fill:"var(--text-primary)"},svg);
+    cardEls[c.id]={card,marg,water,wl,wlab,y};
+  });
+  // 集群机器面板
+  const clWrap=document.getElementById("tp-clusters"), clEls={};
+  TP.clusters.forEach(c=>{const b=D({c:"box"},null,clWrap);
+    b.innerHTML=`<div class="t">${c.id} <span class="kk">(${c.model} · ${fk(c.rate)}/台)</span></div>`
+      +`<div class="kk">机器 <span class="tp-mn val"></span> 台 · 容量 <span class="tp-mc val"></span></div>`
+      +`<div class="kk" style="margin-top:3px">机器：<span class="tp-mach"></span></div>`;
+    clEls[c.id]={box:b,mn:b.querySelector(".tp-mn"),mc:b.querySelector(".tp-mc"),mach:b.querySelector(".tp-mach"),c};});
+  const capEl=document.getElementById("tp-cap"), capLbl=document.getElementById("tp-caplbl");
+  const narr=document.getElementById("tp-narr"), prog=document.getElementById("tp-prog");
+  const steps=TP.trace;
+  let i=-1, timer=null;
+
+  function setLevel(id,lv){const e=cardEls[id];const yy=e.y(lv),y0=e.y(0);
+    e.water.setAttribute("y",yy);e.water.setAttribute("height",Math.max(0,y0-yy));
+    e.wl.setAttribute("y1",yy);e.wl.setAttribute("y2",yy);
+    e.wlab.setAttribute("y",yy-3);e.wlab.textContent=fk(lv);}
+
+  function machinesAt(idx){ // 应用 idx 之前(含)所有 move 步得到各集群机器数
+    const m={}; TP.clusters.forEach(c=>m[c.id]=c.machines0);
+    for(let k=0;k<=idx;k++){const st=steps[k]; if(st&&st.phase==="move"){m[st.from]-=st.machines;m[st.to]+=st.machines;}}
+    return m;
+  }
+  function paintClusters(mc,hi){
+    TP.clusters.forEach(c=>{const e=clEls[c.id];const n=mc[c.id];
+      e.mn.textContent=n; e.mc.textContent=fk(n*c.rate);
+      e.mach.innerHTML=("🟨".repeat(Math.max(0,n))||"—");
+      e.box.style.boxShadow=(hi&&(c.id===hi.from||c.id===hi.to))?"0 0 0 2px var(--self)":"none";});
+  }
+  function modelCapAt(mc,model){return TP.clusters.filter(c=>c.model===model).reduce((s,c)=>s+mc[c.id]*c.rate,0);}
+
+  function lastFillLevel(idx){ // idx 之前最近一个 fill 步的 level
+    for(let k=idx;k>=0;k--){if(steps[k]&&steps[k].phase==="fill")return steps[k].level;}
+    return {};
+  }
+  function render(){
+    const st=i>=0?steps[i]:null;
+    TP.customers.forEach(c=>{cardEls[c.id].card.classList.remove("act");cardEls[c.id].marg.classList.remove("best");
+      cardEls[c.id].marg.textContent="边际收入 —";});
+    const mc=machinesAt(i);
+    paintClusters(mc, st&&st.phase==="move"?st:null);
+    const lv=lastFillLevel(i);
+    TP.customers.forEach(c=>setLevel(c.id, lv[c.id]||0));
+    // 容量条：注水步显示当前模型的容量；否则显示 glm（承接方）
+    const capModel = (st&&st.phase==="fill") ? st.model : "glm";
+    const modelCap = modelCapAt(mc, capModel);
+    const capLeft = (st&&st.phase==="fill") ? st.cap_left
+      : (modelCap - TP.customers.filter(c=>c.model===capModel).reduce((s,c)=>s+(lv[c.id]||0),0));
+    capEl.style.width=(modelCap>0?Math.max(0,capLeft)/modelCap*100:0)+"%";
+    capLbl.textContent=`${capModel} 剩余可分配容量 ${fk(Math.max(0,capLeft))} / 腾挪后 ${fk(modelCap)}（初始 ${fk(modelCapAt(machinesAt(-1),capModel))}）`;
+    if(!st){
+      narr.innerHTML=`初始态：glm 满容量偏小、承接不下 glm 客户；kimi 集群产能有余（只有小客户 kimi-low）。点「播放」看 <b>跨模型把 kimi 空闲机器重部署为 glm 增容 → 各模型客户在本模型容量里边际收入注水（削峰优先·无保底）</b>。`;
+    } else if(st.phase==="move"){
+      narr.innerHTML=`<b>机器重分配</b>：<span style="color:var(--vendor)">${st.from}</span>(${fk(st.from_rate)}/台) → <span style="color:var(--self)">${st.to}</span>(${fk(st.to_rate)}/台) ×${st.machines}台 · 源释放 ${fk(st.removed)} → 目标 +${fk(st.added)} · <span style="color:var(--muted)">${st.reason}</span>`;
+    } else {
+      cardEls[st.cand].card.classList.add("act");
+      if(st.marg){TP.customers.forEach(c=>{const m=st.marg[c.id];if(m!=null)cardEls[c.id].marg.textContent=`边际收入 ${(m*1000).toFixed(1)}`;});
+        cardEls[st.cand].marg.classList.add("best");}
+      narr.innerHTML=`<b>注水</b> · 模型 <b>${st.model}</b> · 选<b>${st.cand}</b>（边际收入 ${(st.marg[st.cand]*1000).toFixed(1)} 最大 = 密度/k × 高于水位的 ${st.time_above} 个时点）`
+        +` → 水位 ${fk(st.from)}→${fk(st.to)}`
+        +(st.capped?`，<span style="color:var(--vendor)">${st.got<st.want-1?'容量抽尽':'到峰值'}、封顶</span>`:``)+`。`;
+    }
+    prog.textContent=`${i+1} / ${steps.length}`;
+  }
+  function next(){ if(i<steps.length-1){i++;render();} else stop(); }
+  function stop(){ if(timer){clearInterval(timer);timer=null;document.getElementById("tp-play").textContent="▶ 播放";} }
+  function play(){ if(timer){stop();return;} document.getElementById("tp-play").textContent="⏸ 暂停";
+    timer=setInterval(()=>{ if(i>=steps.length-1){stop();return;} next(); },1000); }
+  document.getElementById("tp-play").onclick=play;
+  document.getElementById("tp-step").onclick=()=>{stop();next();};
+  document.getElementById("tp-reset").onclick=()=>{stop();i=-1;render();};
+  window.__tpGoto=(n)=>{stop();i=Math.max(-1,Math.min(n,steps.length-1));render();};
+  render();
+})();
+
+/* ---------- REALTIME ---------- */
+(function(){
+  const candWrap=document.getElementById("rt-cands"), clWrap=document.getElementById("rt-clusters");
+  const candEls={}, clEls={};
+  RT.candidates.forEach(c=>{const el=D({c:"c"},null,candWrap);el.id="rtc-"+c.id;
+    el.innerHTML=`<div class="cn" style="font-weight:600">${c.id}</div>`
+      +`<div class="kk">密度 ${(c.density*1000).toFixed(3)}/k · 缺口 ${fk(c.gap)}</div>`
+      +`<div class="bar" style="margin-top:6px"><i class="rt-self" style="width:0;background:var(--self)"></i></div>`
+      +`<div class="kk rt-alab">自建 0</div>`;
+    candEls[c.id]={el,self:el.querySelector(".rt-self"),lab:el.querySelector(".rt-alab")};});
+  RT.clusters.forEach(c=>{const b=D({c:"box"},null,clWrap);b.id="rtcl-"+c.id;
+    b.innerHTML=`<div class="t">${c.id} <span class="kk">(${c.model} · ${fk(c.rate)}/台)</span></div>`
+      +`<div class="kk">native 原生冗余</div><div class="bar"><i class="rt-nat" style="background:var(--self)"></i></div><div class="kk rt-natl"></div>`
+      +`<div class="kk" style="margin-top:4px">received 接收</div><div class="bar"><i class="rt-rec" style="background:var(--recv)"></i></div><div class="kk rt-recl"></div>`
+      +`<div class="kk" style="margin-top:4px">空闲机器 <span class="rt-mach"></span></div>`;
+    clEls[c.id]={box:b,nat:b.querySelector(".rt-nat"),natl:b.querySelector(".rt-natl"),
+      rec:b.querySelector(".rt-rec"),recl:b.querySelector(".rt-recl"),mach:b.querySelector(".rt-mach"),
+      base:Math.max(c.native0, c.rate*4)};});
+  const narr=document.getElementById("rt-narr"), prog=document.getElementById("rt-prog");
+  const steps=RT.trace; let i=-1, timer=null;
+
+  function paintClusters(nat,rec,ext){
+    RT.clusters.forEach(c=>{const e=clEls[c.id], base=e.base;
+      const n=nat?nat[c.id]:c.native0, r=rec?rec[c.id]:0, m=ext?ext[c.id]:c.idle0;
+      e.nat.style.width=(Math.max(0,n)/base*100)+"%"; e.natl.textContent=fk(Math.max(0,n));
+      e.rec.style.width=(Math.max(0,r)/base*100)+"%"; e.recl.textContent=fk(Math.max(0,r));
+      e.mach.innerHTML=("🟨".repeat(Math.max(0,m))||"—");});
+  }
+  function render(){
+    RT.candidates.forEach(c=>{candEls[c.id].el.classList.remove("act","done");});
+    if(i<0){ paintClusters(null,null,null);
+      RT.candidates.forEach(c=>{candEls[c.id].self.style.width="0";candEls[c.id].lab.textContent="自建 0";});
+      narr.innerHTML=`初始：候选按<b>收入密度降序</b>。点「播放」看每个客户如何 <b>先吃现有冗余 → 不足则腾挪机器（native/received 分账）→ 记账</b>。`;
+      prog.textContent=`0 / ${steps.length}`; return; }
+    // apply all steps up to i
+    for(let k=0;k<=i;k++){const st=steps[k];
+      candEls[st.cand].self.style.width=(st.allocated/st.gap*100)+"%";
+      candEls[st.cand].lab.textContent=`自建 ${fk(st.allocated)}（自建比 ${(st.to_self_ratio*100).toFixed(0)}%）`;
+      if(k<i)candEls[st.cand].el.classList.add("done");}
+    const st=steps[i];
+    candEls[st.cand].el.classList.add("act");
+    paintClusters(st.native, st.received, st.extra);
+    let msg=`处理 <b>${st.cand}</b>（密度 ${(st.density*1000).toFixed(3)}/k，缺口 ${fk(st.gap)}）：① 现有冗余分配 ${fk(st.existing)}`;
+    if(st.moves.length){const mv=st.moves[0];
+      msg+=`；仍差 → ② 腾挪 <span style="color:var(--vendor)">${mv.from}</span> ${mv.machines}台→<span style="color:var(--self)">${mv.to}</span>`
+        +`（源 native −${fk(mv.removed)}，目标 received +${fk(mv.added)}）→ 再分配`;}
+    msg+=`；③ 记账：自建 ${fk(st.allocated)}（比 ${(st.to_self_ratio*100).toFixed(0)}%）。`;
+    narr.innerHTML=msg;
+    prog.textContent=`${i+1} / ${steps.length}`;
+  }
+  function next(){ if(i<steps.length-1){i++;render();} else stop(); }
+  function stop(){ if(timer){clearInterval(timer);timer=null;document.getElementById("rt-play").textContent="▶ 播放";} }
+  function play(){ if(timer){stop();return;} document.getElementById("rt-play").textContent="⏸ 暂停";
+    timer=setInterval(()=>{ if(i>=steps.length-1){stop();return;} next(); },1400); }
+  document.getElementById("rt-play").onclick=play;
+  document.getElementById("rt-step").onclick=()=>{stop();next();};
+  document.getElementById("rt-reset").onclick=()=>{stop();i=-1;render();};
+  window.__rtGoto=(n)=>{stop();i=Math.max(-1,Math.min(n,steps.length-1));render();};
+  render();
+})();
+
+/* ---------- tabs ---------- */
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));t.classList.add("on");
+  document.getElementById("view-tp").classList.toggle("hide",t.dataset.t!=="tp");
+  document.getElementById("view-rt").classList.toggle("hide",t.dataset.t!=="rt");
+});
+/* deep-link a step for review: #tp7 / #rt2 */
+(function(){const m=(location.hash||"").match(/^#(tp|rt)(\d+)?$/);if(!m)return;
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x.dataset.t===m[1]));
+  document.getElementById("view-tp").classList.toggle("hide",m[1]!=="tp");
+  document.getElementById("view-rt").classList.toggle("hide",m[1]!=="rt");
+  const n=m[2]?parseInt(m[2]):0; if(m[1]==="tp")window.__tpGoto(n); else window.__rtGoto(n);
+})();
+</script></div></body></html>

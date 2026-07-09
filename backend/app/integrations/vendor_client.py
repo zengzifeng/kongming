@@ -11,6 +11,9 @@ class VendorQuotaDTO:
     quota_tpm: float
     unit_cost: float
     unit_price: float
+    actual_tpm: float = 0.0
+    actual_redundant_tpm: float = 0.0
+    purchase_discount: float = 0.0
 
 
 # 兼容旧导入名：算法层与 snapshot.py 早期引用 VendorQuota
@@ -56,6 +59,9 @@ class VendorClient:
                 quota_tpm=float(r.quota_tpm),
                 unit_cost=float(r.unit_cost),
                 unit_price=float(r.unit_price),
+                actual_tpm=float(getattr(r, "actual_tpm", 0) or 0),
+                actual_redundant_tpm=float(getattr(r, "actual_redundant_tpm", 0) or 0),
+                purchase_discount=float(getattr(r, "purchase_discount", 0) or 0),
             )
             for r in rows
         ]

@@ -26,8 +26,12 @@ class VendorQuota(BaseModel):
     vendor: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     model: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     quota_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+    actual_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)            # 三方供应商实跑量
+    actual_redundant_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)  # 三方供应商实跑冗余量
     unit_cost: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
     unit_price: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
+    # 采购折扣直值（录入字段）。求解器 _purchase_discount 优先取此值，缺省(<=0)时回退 unit_cost/unit_price 导出。
+    purchase_discount: Mapped[float] = mapped_column(Numeric(6, 4), default=0)
     effective_from: Mapped[datetime] = mapped_column(nullable=False)
     effective_to: Mapped[datetime | None] = mapped_column()
     status: Mapped[str] = mapped_column(String(16), default=VendorStatus.ACTIVE,

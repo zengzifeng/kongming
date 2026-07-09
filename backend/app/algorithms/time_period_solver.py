@@ -56,21 +56,26 @@ class TimePeriodSolver(SolverEconomicsMixin):
         candidates, rejected = self._build_candidates(snapshot.demands, vendors, model_prices, timeline)
         candidates.sort(key=lambda c: c.score, reverse=True)
 
-        # ---- C. 一次机器重分配：按峰值把选中客户所需自建容量配齐 ----
+        # ---- C. 一次机器重分配：按“每机器边际收入面积”配齐（机会成本加权，不只按峰值台数）----
         machines_before = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
-        node_moves, accepted, rejected = self._plan_reallocation(candidates, clusters, rejected)
+        node_moves, accepted, rejected = self._plan_reallocation(candidates, clusters, rejected, timeline)
         machines_after = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
 
         # 每模型调整后的自建容量（machine_count 已被 _plan_reallocation 就地更新）
         model_self_capacity = self._model_capacity(clusters)
 
         # ---- D. 固定水位线：机器调整后「一次性」设定每个客户的自建TPM上限（水位线），此后不随时间变化。 ----
-        watermarks = self._compute_watermarks(accepted, clusters, timeline)
+        # 削峰优先（无保底）：当前自建与待回收三方一视同仁，从 0 做纯边际收入注水，突刺形状的当前自建
+        # 也会被削峰。kept = 实际拿到自建容量（wm>0）的客户，供汇总展示。
+        considered = accepted            # 进入 D 的全体候选（保留，用于 before/after 积分口径一致）
+        watermarks, kept = self._compute_watermarks(considered, clusters, timeline)
 
-        # ---- 时序积分：水位线固定，仅客户跑量随时间变化 -> 自建/三方分发占比随之变化 ----
-        after = self._integrate(accepted, watermarks, timeline, adjust=True)
-        before = self._integrate(accepted, watermarks, timeline, adjust=False)
+        # ---- 时序积分：before/after 都对**全体候选**积分（wm=0 的被削客户 after 自建=0、before=当前自建），
+        #      这样把"当前自建被削峰挖回三方"的损失正确计入 gain，不虚高。 ----
+        after = self._integrate(considered, watermarks, timeline, adjust=True)
+        before = self._integrate(considered, watermarks, timeline, adjust=False)
         revenue_gain = after["self_revenue"] - before["self_revenue"]
+        accepted = kept                  # 汇总/约束里的 accepted 只列真正拿到自建的客户
 
         # ---- E. 约束体检 ----
         constraints = self._build_constraints(
@@ -175,26 +180,49 @@ class TimePeriodSolver(SolverEconomicsMixin):
     def _servable_clusters(self, demand: DemandSnapshotItem, clusters: list[dict]) -> list[dict]:
         return self._matching_clusters(demand.model_name, clusters, demand.customer_code)
 
-    def _plan_reallocation(self, candidates, clusters, rejected):
-        """按峰值给高密度客户配齐自建容量；不足则在集群间腾挪机器（总量守恒）。
+    def _machine_area(self, cand, rate, timeline) -> float:
+        """一台 `rate` 产能的机器全时段服务该客户能产出的自建收入「面积」（gross，covered=0）：
+        density × Σ_t min(rate, 需求(t))。用于按“每机器面积”比较机会成本，而非按空闲台数或每 TPM 密度。
+        —— 速率不同的集群间，一台机器的价值 = 速率 × 密度 × 有效时点数，这里直接积分出来。"""
+        series = self._series_of(cand.demand, timeline)
+        return cand.unit_self_revenue * sum(min(rate, max(tpm, 0.0)) for _, tpm in series)
+
+    def _plan_reallocation(self, candidates, clusters, rejected, timeline):
+        """机器一次重分配：仅当某模型**满容量**不足以覆盖其需求时，才从别处搬空闲机器过来。
         就地更新 clusters 的 machine_count；返回 (node_moves, accepted, rejected)。
 
-        冗余分账（与 realtime 一致）：native_free = 集群「原生」空闲容量（可被 commit 消耗，也可
-        背书供出机器）；received_free = 腾挪「接收」到的容量（只可被 commit 消耗，永不背书供出）。
-        供出上限只看 native_free，杜绝“原生容量已被占用却靠接收余量供出已占用机器”的重复占用，
-        从而可安全允许集群既供又收（A→B & C→A），无需 donor/receiver 互斥。"""
+        两套账本分离，与 Step D 口径对齐：
+        - **可用容量 free = Σ max(0, machine_count×rate − reserved)**（**规划口径**，与 Step D 相同）：
+          决定“是否要搬机器”与接纳。搬运就地改 machine_count（cap_of 实时反映）；`reserved[c]` 记前序
+          客户的预留（clamp 到满容量）→ free 恒 ≥0，不会像“直接扣 full_avail”那样在“先 reserve 后
+          供出”时被扣成负。
+        - native_free = current_redundant_tpm（**物理护栏**）：只作 `_acquire_machines` 的供出上限
+          `min(donatable, native_free//src_rate)`，保证只搬**真正空闲**的机器。只被搬运递减、
+          接收不递增、reserve 不碰 → 恒 ≥0，且“接收的机器不进 native_free 就无法再供出”天然防 relay。
+        """
         by_name = {c["cluster_name"]: c for c in clusters}
+        rate_of = {c["cluster_name"]: float(c.get("tpm_per_machine", 0) or 0) for c in clusters}
+        # reserved[c] = 已被前序客户预留的满容量（≤ 该簇满容量）。free 由 machine_count 实时算，
+        # 恒 ≥0（不会像"直接扣 full_avail"那样在"先 reserve 后供出"时被扣成负）。
+        reserved = {c["cluster_name"]: 0.0 for c in clusters}
+
+        def cap_of(name):
+            return float(by_name[name].get("machine_count", 0) or 0) * rate_of.get(name, 0.0)
         native_free = {
             c["cluster_name"]: max(float(c.get("current_redundant_tpm", 0) or 0), 0.0)
             for c in clusters
         }
-        received_free = {c["cluster_name"]: 0.0 for c in clusters}
         donatable = {c["cluster_name"]: self._donatable_machines(c) for c in clusters}
+        # 每集群「可服务的全部候选」（机会成本用：一台机器留在源集群能承接哪些客户的面积）
+        servable_by_cluster: dict[str, list] = {}
+        for cand in candidates:
+            for c in self._servable_clusters(cand.demand, clusters):
+                servable_by_cluster.setdefault(c["cluster_name"], []).append(cand)
         node_moves: list[dict] = []
         accepted: list[_Candidate] = []
 
         def servable_free(servable):
-            return sum(native_free.get(c["cluster_name"], 0.0) + received_free.get(c["cluster_name"], 0.0)
+            return sum(max(0.0, cap_of(c["cluster_name"]) - reserved.get(c["cluster_name"], 0.0))
                        for c in servable)
 
         for cand in candidates:
@@ -203,54 +231,89 @@ class TimePeriodSolver(SolverEconomicsMixin):
             if not servable:
                 rejected.append(self._reject(demand, "no_servable_cluster"))
                 continue
-            free = servable_free(servable)
-            need = cand.peak_vendor_gap  # 峰值处要回收的量
+            free = servable_free(servable)          # 满容量口径（machine_count×rate − 已reserve，≥0）
+            need = cand.peak_vendor_gap             # 峰值处要回收的量
 
-            if need - free > EPS:
-                moves = self._acquire_machines(demand, need - free, servable, clusters, donatable, native_free)
+            if need - free > EPS:                   # 满容量真的不够才搬
+                moves = self._acquire_machines(
+                    cand, need - free, servable, clusters, donatable, native_free,
+                    servable_by_cluster, timeline,
+                )
                 for mv in moves:
                     src, tgt = mv["from_cluster"], mv["to_cluster"]
-                    by_name[src]["machine_count"] -= mv["machine_count"]
+                    by_name[src]["machine_count"] -= mv["machine_count"]   # machine_count 就地更新→cap_of 实时反映
                     by_name[tgt]["machine_count"] += mv["machine_count"]
                     donatable[src] -= mv["machine_count"]
-                    native_free[src] = native_free.get(src, 0.0) - mv["removed_tpm"]     # 源失去原生空闲
-                    received_free[tgt] = received_free.get(tgt, 0.0) + mv["added_tpm"]    # 目标获得接收容量
+                    native_free[src] = native_free.get(src, 0.0) - mv["removed_tpm"]   # 源失去物理空闲
                     node_moves.append(mv)
                 free = servable_free(servable)
 
-            take = min(need, free)
-            if take <= EPS:
+            # 接纳只看“可服务集群**原始满容量** > 0”（不受 reserve 扣减影响）；真实自建量由 Step D
+            # 面积注水决定（D 用满容量重算）。这样避免高峰客户在 C 阶段把低峰/常态客户饿死。
+            servable_cap = sum(cap_of(c["cluster_name"]) for c in servable)
+            if servable_cap <= EPS:
                 rejected.append(self._reject(demand, "self_cluster_capacity_insufficient"))
                 continue
-            # 记账：把 take 从可服务集群扣减（先扣 received 再扣 native，把原生容量尽量留作可供出）
-            self._commit(servable, native_free, received_free, take)
+            # 预留：把 min(need, free) 逐簇累加进 reserved（clamp 到各簇满容量），供后续客户 free 计算。
+            self._reserve(servable, reserved, cap_of, min(need, free))
             accepted.append(cand)
 
         return node_moves, accepted, rejected
 
-    def _acquire_machines(self, demand, shortfall_tpm, servable, clusters, donatable, native_free) -> list[dict]:
-        """为承接 demand 腾挪机器到其可服务集群中单机能力最高者。目标速率计产能，源速率释放。
-        无需 donor/receiver 互斥：接收容量进 received_free、永不背书供出，真 relay 结构上不可能。"""
+    def _acquire_machines(self, cand, shortfall_tpm, servable, clusters, donatable, native_free,
+                          servable_by_cluster, timeline) -> list[dict]:
+        """为承接 `cand` 腾挪机器：目标取可服务集群里“加一台机器边际面积最高”者，源按**机会成本**
+        （留在源集群一台机器能承接的最高面积）从低到高选，且**仅当目标增益 > 源机会成本**才搬——
+        杜绝“把高产能机器搬到低产能目标只承接很小一段业务”的降面积挪动。
+
+        无需 donor/receiver 互斥：接收的机器不进 native_free（源物理空闲）就无法再供出，真 relay
+        结构上不可能。禁止“同模型 rate 套利”搬运（同模型 + target_rate > src_rate）。"""
+        demand = cand.demand
         targets = [c for c in servable if float(c.get("tpm_per_machine", 0) or 0) > 0]
         if not targets:
             return []
-        target = max(targets, key=lambda c: float(c.get("tpm_per_machine", 0) or 0))
+        # 目标：一台机器服务本客户面积最高的集群（速率越高、可承接面积越大）
+        target = max(targets, key=lambda c: self._machine_area(cand, float(c.get("tpm_per_machine", 0) or 0), timeline))
         target_rate = float(target.get("tpm_per_machine", 0) or 0)
+        target_gain = self._machine_area(cand, target_rate, timeline)  # 目标端每机器增益
+
+        def opportunity(src) -> float:
+            # 机会成本 = 这台机器留在源集群、服务源集群自己可服务客户的最高每机器面积（排除本客户）
+            src_rate = float(src.get("tpm_per_machine", 0) or 0)
+            best = 0.0
+            for oc in servable_by_cluster.get(src["cluster_name"], []):
+                if oc is cand:
+                    continue
+                best = max(best, self._machine_area(oc, src_rate, timeline))
+            return best
+
+        target_model = target.get("deployed_model")
+        servable_names = {c["cluster_name"] for c in servable}
         sources = [c for c in clusters
-                   if c["cluster_name"] != target["cluster_name"]
+                   if c["cluster_name"] not in servable_names   # 源必须在本客户**可服务集群之外**：
+                   # 可服务集群本已计入 free，在其间搬对本客户是净零 churn；真正能补容量的只有
+                   # 跨模型 / 专属不可达（primary≠本客户）的空闲机器。
                    and donatable.get(c["cluster_name"], 0) > 0
-                   and float(c.get("tpm_per_machine", 0) or 0) > 0]
-        sources.sort(key=lambda c: donatable.get(c["cluster_name"], 0), reverse=True)
+                   and float(c.get("tpm_per_machine", 0) or 0) > 0
+                   # 禁止“同模型 rate 套利”：同模型内把低速率集群机器搬到高速率集群、按目标速率计产能，
+                   # 会凭空抬高总容量（幻影）。同模型=同吞吐，rate 差是硬件差、不可随重部署转移。
+                   # 保留：跨模型搬运；同模型降速率搬运（如专属集群→共享集群，把机器搬到客户能用处）。
+                   and not (c.get("deployed_model") == target_model
+                            and float(c.get("tpm_per_machine", 0) or 0) < target_rate - EPS)]
+        # 机会成本从低到高：最“不值得留在源”的机器先搬
+        sources.sort(key=opportunity)
 
         moves: list[dict] = []
         added = 0.0
         for src in sources:
             if added >= shortfall_tpm:
                 break
+            # 仅当目标每机器增益 > 源机会成本才搬（相等/更低都不搬，杜绝无谓或降面积挪动）
+            if target_gain - opportunity(src) <= EPS:
+                break  # sources 已按机会成本升序，后续只会更贵，直接停
             name = src["cluster_name"]
             src_rate = float(src.get("tpm_per_machine", 0) or 0)
             # 安全护栏：可搬走台数受源集群仍空闲的【原生】容量限制，只有 native_free 背书的机器可供出。
-            # （旧版仅用 donatable 台数、无容量护栏，存在 commit-then-donate 的容量重复占用。）
             movable = min(donatable.get(name, 0), int((native_free.get(name, 0.0) + EPS) // src_rate))
             if movable <= 0:
                 continue
@@ -263,64 +326,93 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 "model": demand.model_name, "machine_count": machines,
                 "added_tpm": machines * target_rate, "removed_tpm": machines * src_rate,
                 "from_tpm_per_machine": src_rate, "to_tpm_per_machine": target_rate,
-                "reason": f"承接优质客户 {demand.customer_code}（峰值定容）",
+                "reason": f"承接优质客户 {demand.customer_code}（每机器面积 {target_gain:.0f} > 源机会成本）",
             })
             added += machines * target_rate
         return moves
 
-    def _commit(self, servable, native_free, received_free, amount):
+    def _reserve(self, servable, reserved, cap_of, amount):
+        """把 `amount` 逐簇累加进 reserved（clamp 到各簇满容量 cap_of，不超订）。用于 Step C 规划口径：
+        把当前客户的预期用量记入预留，使后续客户的 free = Σ max(0, cap − reserved) 相应变小。"""
         remaining = amount
         for c in servable:
             if remaining <= EPS:
                 break
             name = c["cluster_name"]
-            # 先扣 received 再扣 native：把原生容量尽量留作可供出（与 realtime 一致）。
-            take_recv = min(remaining, received_free.get(name, 0.0))
-            received_free[name] = received_free.get(name, 0.0) - take_recv
-            remaining -= take_recv
-            if remaining <= EPS:
-                break
-            take_nat = min(remaining, native_free.get(name, 0.0))
-            native_free[name] = native_free.get(name, 0.0) - take_nat
-            remaining -= take_nat
+            room = max(0.0, cap_of(name) - reserved.get(name, 0.0))
+            take = min(remaining, room)
+            reserved[name] = reserved.get(name, 0.0) + take
+            remaining -= take
 
     # ---------------- D. 固定水位线 + 时序积分 ----------------
-    def _compute_watermarks(self, accepted, clusters, timeline) -> dict[str, float]:
+    def _compute_watermarks(self, accepted, clusters, timeline) -> tuple[dict[str, float], list[_Candidate]]:
         """机器调整后「一次性」为每个客户设定固定的自建TPM上限（水位线）。此后不随时间变化。
 
-        分配口径：在各模型系统峰值时点，先按【当前自建量】保底（不把已在自建的流量赶去三方），
-        再把剩余自建容量按【收入密度】优先分给待回收的三方流量，各客户封顶到其峰值需求。
-        受专属集群约束（KSCC/XISHANJU 只服务对应客户）与集群级容量约束。
+        目标：最大化整段自建收入 Σ_t Σ_i min(需求_i(t), wm_i) × 密度_i，
+        约束：Σ 抽取 ≤ 各集群满容量（经 _draw 施加，含专属集群约束）；wm_i ∈ [0, 自身峰值]。
+        保证型不过订：Σwm ≤ Σcap。
+
+        **削峰优先（无保底硬约束）**：当前自建量与待回收三方一视同仁，一律从 0 做纯边际收入注水——
+        反复挑“抬高水位线的**边际收入**最大”的客户，把它的水位抬到下一个 breakpoint。
+        边际收入 = 密度 × |{t: 需求(t) > 当前水位}|（= 密度 × 高于当前水位的时点数，密度已在其中）。
+        尖峰（高、窄，时点少）边际收入低 → 被削到低水位；常态（矮、宽，时点多）边际收入高 → 优先注满。
+        故**突刺形状的当前自建也会被削峰**（那部分挖回三方），把有限容量投到收入最高处。
+        返回 (watermarks, kept)；kept = 实际拿到自建容量（wm>0）的客户，供 _integrate/汇总使用。
         """
         watermarks: dict[str, float] = {}
+        kept: list[_Candidate] = []
         by_model: dict[str, list[_Candidate]] = {}
         for c in accepted:
             by_model.setdefault(c.demand.model_name, []).append(c)
 
         for model, custs in by_model.items():
-            custs = sorted(custs, key=lambda c: c.unit_self_revenue, reverse=True)
             series = {c.demand.report_id: self._series_of(c.demand, timeline) for c in custs}
-            # 系统峰值时点：该模型全部客户合计需求最大的时刻（水位线按此刻的容量竞争一次性定死）
-            agg = [sum(series[c.demand.report_id][ti][1] for c in custs) for ti in range(len(timeline))]
-            pk = max(range(len(timeline)), key=lambda ti: agg[ti]) if timeline else 0
             cluster_cap = {
                 cc["cluster_name"]: float(cc.get("machine_count", 0) or 0) * float(cc.get("tpm_per_machine", 0) or 0)
                 for cc in clusters
             }
-            # 第一轮：按当前自建量保底（顺序无关，各客户从自己可服务集群抽取）
-            base = {}
+            level = {c.demand.report_id: 0.0 for c in custs}   # 一律从 0 起注水（无保底）
+            peak = {c.demand.report_id: c.peak_tpm for c in custs}
+            unit = {c.demand.report_id: c.unit_self_revenue for c in custs}
+            demand_of = {c.demand.report_id: c.demand for c in custs}
+            # 每客户候选水位断点（其序列里 distinct tpm 值，升序）——两断点间边际收入恒定
+            breakpoints = {
+                c.demand.report_id: sorted({tpm for _, tpm in series[c.demand.report_id]})
+                for c in custs
+            }
+            capped: set[str] = set()  # 已封顶（到峰值）或所在集群已无容量的客户
+
+            def time_above(rid, lv):
+                return sum(1 for _, tpm in series[rid] if tpm > lv + EPS)
+
+            def next_breakpoint(rid, lv):
+                for bp in breakpoints[rid]:
+                    if bp > lv + EPS:
+                        return min(bp, peak[rid])
+                return peak[rid]
+
+            while True:
+                best_rid, best_marginal = None, 0.0
+                for c in custs:
+                    rid = c.demand.report_id
+                    if rid in capped or level[rid] >= peak[rid] - EPS:
+                        continue
+                    marginal = unit[rid] * time_above(rid, level[rid])  # 边际收入 = 密度 × 时点数
+                    if marginal > best_marginal + EPS:
+                        best_marginal, best_rid = marginal, rid
+                if best_rid is None:
+                    break
+                target_level = next_breakpoint(best_rid, level[best_rid])
+                want = target_level - level[best_rid]
+                got = self._draw(demand_of[best_rid], clusters, cluster_cap, want)
+                level[best_rid] += got
+                if got < want - EPS or level[best_rid] >= peak[best_rid] - EPS:
+                    capped.add(best_rid)  # 容量抽尽或已到峰值，不再参与
             for c in custs:
-                rid = c.demand.report_id
-                d_pk = series[rid][pk][1]
-                cur_self = d_pk * c.demand.current_self_ratio
-                base[rid] = self._draw(c.demand, clusters, cluster_cap, cur_self)
-            # 第二轮：剩余容量按密度优先回收三方流量，封顶到峰值需求
-            for c in custs:
-                rid = c.demand.report_id
-                d_pk = series[rid][pk][1]
-                extra = self._draw(c.demand, clusters, cluster_cap, max(d_pk - base[rid], 0.0))
-                watermarks[rid] = base[rid] + extra
-        return watermarks
+                watermarks[c.demand.report_id] = level[c.demand.report_id]
+                if level[c.demand.report_id] > EPS:   # 拿到自建容量的才计入 accepted
+                    kept.append(c)
+        return watermarks, kept
 
     def _integrate(self, accepted, watermarks, timeline, adjust: bool):
         """时序积分：水位线固定，逐时点 self(t)=min(需求(t), 水位线)；三方=需求−自建。
@@ -351,7 +443,8 @@ class TimePeriodSolver(SolverEconomicsMixin):
                         "vendor_ratios": {(c.best_vendor or {}).get("vendor", "vendor"): round(1 - ratio, 4)},
                     })
                     cust_gain += (self_t - tpm_t * c.demand.current_self_ratio) * unit
-            if adjust:
+            if adjust and (level > EPS or c.demand.current_self_ratio > EPS):
+                # 只对"有自建 or 曾有自建"的客户产出水位变更；wm=0 且从未自建的纯空转客户跳过。
                 wm_out.append({
                     "report_id": rid, "customer_code": c.demand.customer_code,
                     "model": c.demand.model_name, "current_self_ratio": c.demand.current_self_ratio,

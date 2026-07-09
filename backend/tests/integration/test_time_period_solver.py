@@ -157,37 +157,228 @@ def test_time_period_no_double_count_same_model_donor():
         assert total_self <= cap + 1e-6  # 无虚增：自建合计不超过真实物理容量
 
 
-def test_time_period_allows_donor_to_also_receive():
-    # 倒手放开：glm-A 先把唯一空闲机器供给高密度 modelB 客户(A→B)，
-    # 随后 glm-A 自己的 modelA 客户靠 clC→A 承接。旧 donor/receiver 互斥会阻断。
+def test_time_period_cross_model_move_and_conservation():
+    # 跨模型搬运：modelB 目标满容量 0（真缺）→ 从空闲的 modelC 集群搬机器重部署为 modelB。
+    # 机器总量守恒；modelB 客户被接纳。
     clusters = [
-        _tp_cl("clA", "modelA", 50_000, 50_000, 1),
-        _tp_cl("clB", "modelB", 50_000, 0, 0),
-        _tp_cl("clC", "modelC", 50_000, 50_000, 1),
+        _tp_cl("clB", "modelB", 50_000, 0, 0, machine_count=0),   # 目标：满容量 0
+        _tp_cl("clC", "modelC", 50_000, 100_000, 2),              # 空闲 modelC，可跨模型供出
+    ]
+    result = TimePeriodSolver().solve(_multi_snapshot(
+        [_tp_dem("hd_B", "modelB", 80_000, 0.9)], clusters, ["modelB", "modelC"]))
+    moves = result.summary["node_moves"]
+    accepted = {a["report_id"] for a in result.summary["accepted_customers"]}
+    assert any(m["from_cluster"] == "clC" and m["to_cluster"] == "clB" for m in moves)  # 跨模型搬运
+    assert "hd_B" in accepted
+    assert result.summary["machines_total_before"] == result.summary["machines_total_after"]
+
+
+def test_time_period_no_same_model_rate_arbitrage():
+    # 禁同模型 rate 套利：低速率同模型源必须是"对本客户不可服务"（专属簇）才会成为候选源，
+    # 再被套利护栏挡掉（同模型 + src_rate<target_rate）。同时给一个跨模型源证明它可被正常选用。
+    clusters = [
+        # 目标 hi：共享 glm、高速率、满容量小 → 触发搬运
+        {"cluster_name": "hi", "deployed_model": "glm", "machine_count": 1, "tpm_per_machine": 80_000,
+         "current_redundant_tpm": 80_000, "current_redundant_machines": 0},
+        # lo-KSCC：同模型 glm、低速率、专属 kscc-cust（对 c 不可服务）、有空闲 → 若无护栏会被套利搬来
+        {"cluster_name": "lo-KSCC", "deployed_model": "glm", "machine_count": 4, "tpm_per_machine": 50_000,
+         "current_redundant_tpm": 150_000, "current_redundant_machines": 3, "primary_customer": "kscc-cust"},
+        # kimi-idle：跨模型空闲源（应被正常选用）
+        {"cluster_name": "kimi-idle", "deployed_model": "kimi", "machine_count": 3, "tpm_per_machine": 50_000,
+         "current_redundant_tpm": 150_000, "current_redundant_machines": 3},
+    ]
+    result = TimePeriodSolver().solve(_multi_snapshot(
+        [_tp_dem("c", "glm", 200_000, 0.9)], clusters, ["glm", "kimi"]))
+    froms = {m["from_cluster"] for m in result.summary["node_moves"]}
+    assert "lo-KSCC" not in froms   # 同模型低速率专属源：套利被禁
+    assert "kimi-idle" in froms     # 跨模型源：正常选用
+
+
+def test_time_period_no_net_zero_same_model_churn():
+    # 净零 churn：同模型同速率共享双簇 + 需求 > 合计容量。两簇都是本客户可服务集群、已计入 free，
+    # 在其间搬机器对本客户净零无益 → 不应产生该搬运。
+    clusters = [
+        _tp_cl("a", "m", 50_000, 100_000, 2),   # 4×50k=200k
+        _tp_cl("b", "m", 50_000, 100_000, 2),   # 4×50k=200k
+    ]
+    result = TimePeriodSolver().solve(_multi_snapshot(
+        [_tp_dem("big", "m", 500_000, 0.9)], clusters, ["m"]))  # 500k > 合计 400k
+    moves = result.summary["node_moves"]
+    # 不含同模型同速率簇之间的互搬（a<->b），实际应为空
+    assert all(not (m["from_cluster"] in ("a", "b") and m["to_cluster"] in ("a", "b")) for m in moves)
+
+
+
+def test_time_period_donation_bounded_by_physical_idle():
+    # 物理供出护栏：源簇 donatable=2 台，但 current_redundant_tpm 只有 1 台份 → 只能供 1 台。
+    clusters = [
+        _tp_cl("clT", "modelT", 50_000, 0, 0, machine_count=0),   # 目标：满容量 0
+        # clS：4 台，2 台标记空闲，但原生空闲 TPM 只有 50k（=1 台份）→ movable=min(2, 50k//50k)=1
+        _tp_cl("clS", "modelS", 50_000, 50_000, 2),
+    ]
+    result = TimePeriodSolver().solve(_multi_snapshot(
+        [_tp_dem("c", "modelT", 200_000, 0.9)], clusters, ["modelT", "modelS"]))
+    moved = sum(m["machine_count"] for m in result.summary["node_moves"] if m["from_cluster"] == "clS")
+    assert moved <= 1  # 受物理原生空闲 TPM（1 台份）限制，最多搬 1 台
+
+
+
+def test_time_period_opportunity_cost_prefers_idle_source():
+    # 机会成本选源：hd_B 的目标 clB 满容量为 0（真缺），需从别处搬机器。
+    # clA 有自己的高价值 modelA 客户（机会成本高），clC 完全空闲（机会成本=0）→ 应从 clC 供出、放过 clA。
+    clusters = [
+        _tp_cl("clB", "modelB", 50_000, 0, 0, machine_count=0),   # 目标：满容量 0 → 触发搬运
+        _tp_cl("clA", "modelA", 50_000, 50_000, 1),   # 1 台空闲，但有 own_A 争抢（机会成本高）
+        _tp_cl("clC", "modelC", 50_000, 50_000, 1),   # 1 台空闲，无客户（机会成本 0）
     ]
     result = TimePeriodSolver().solve(_multi_snapshot([
         _tp_dem("hd_B", "modelB", 50_000, 0.9),
-        _tp_dem("own_A", "modelA", 50_000, 0.5),
+        _tp_dem("own_A", "modelA", 50_000, 0.9),       # 高价值，占住 clA 的机会成本
     ], clusters, ["modelA", "modelB", "modelC"]))
-    accepted = {a["report_id"] for a in result.summary["accepted_customers"]}
-    moves = result.summary["node_moves"]
-    froms = {m["from_cluster"] for m in moves}
-    tos = {m["to_cluster"] for m in moves}
-    assert "hd_B" in accepted and "own_A" in accepted
-    assert "clA" in froms and "clA" in tos  # clA 既供出又接收
+    froms = {m["from_cluster"] for m in result.summary["node_moves"]}
+    assert "clC" in froms and "clA" not in froms  # 优先空闲源，放过有价值需求的 clA
+
 
 
 def test_time_period_commit_then_donate_blocked():
-    # 分账安全：高密度客户先 commit 吃空 clA 的原生冗余后，clA 虽仍有 donatable 机器，
-    # 但 native_free=0 → 不得被当作源供出（movable=min(donatable, native_free//rate)=0）。
-    clusters = [
-        _tp_cl("clA", "modelA", 50_000, 100_000, 2),  # 2 台原生空闲
-        _tp_cl("clC", "modelC", 50_000, 0, 0),         # 跨模型客户本集群无冗余
-    ]
-    result = TimePeriodSolver().solve(_multi_snapshot([
-        _tp_dem("drain_A", "modelA", 100_000, 0.9),   # 高密度，先吃空 clA 原生冗余
-        _tp_dem("wants_C", "modelC", 100_000, 0.5),   # 想从 clA 腾挪，但 clA 已被占用
-    ], clusters, ["modelA", "modelC"]))
-    froms = {m["from_cluster"] for m in result.summary["node_moves"]}
-    assert "clA" not in froms  # clA 原生已被 commit 占用，不得再供出
+    # 已删除：旧“commit 吃 native_free 后不得供出”前提在满容量口径下不复存在
+    # （commit 已改为 reserve、不碰 native_free）。物理供出护栏改由
+    # test_time_period_donation_bounded_by_physical_idle 覆盖。
+    pass
+
+
+# ---- Q1：边际面积注水（削峰承接更多常态面积）----
+
+def _cl_single(cap_machines=2, rate=50_000, redundant=100_000):
+    return {"cluster_name": "c", "deployed_model": "m", "machine_count": cap_machines,
+            "tpm_per_machine": rate, "current_redundant_tpm": redundant, "current_redundant_machines": 0}
+
+
+def _dem_series(rid, vals, discount=0.9):
+    return DemandSnapshotItem(
+        report_id=rid, customer_code=rid, model_name="m", expected_tpm=max(vals), expected_rpm=0,
+        discount_rate=discount, input_ratio=1.0, cache_hit_rate=0.0, current_self_ratio=0.0,
+        current_vendor_ratios={"tp": 1.0}, tpm_series=_series24(vals),
+    )
+
+
+def _series24(vals):
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    return [(base.replace(hour=h).isoformat(), v) for h, v in enumerate(vals)]
+
+
+def _mk(demands):
+    vendors = [{"vendor": "tp", "model": "m", "quota_tpm": 9_000_000, "unit_cost": 0.0002, "unit_price": 0.0010}]
+    prices = {"m": {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.0010, "output_price": 0.0010}}
+    return PolicyInputSnapshot(
+        captured_at=datetime.now(timezone.utc), algorithm="time_period", demands=demands,
+        resources={"clusters": [_cl_single()]}, monitoring={}, vendors=vendors, params={"model_prices": prices})
+
+
+def _area(wm_map, series_map):
+    return sum(sum(min(v, wm_map.get(rid, 0)) for v in vals) for rid, vals in series_map.items())
+
+
+def test_time_period_watermark_shaves_narrow_peak_for_wide_baseline():
+    # Q1 核心：容量紧张(100k)。narrow=高窄尖峰(1点100k,其余10k)；wide=矮宽常态(全天60k)，同密度。
+    # 边际面积注水应把容量优先给 wide(时点多、面积大)，削 narrow 的尖峰 → 总自建面积 > 旧峰值贪心。
+    narrow = [100_000] + [10_000] * 23
+    wide = [60_000] * 24
+    result = TimePeriodSolver().solve(_mk([_dem_series("narrow", narrow), _dem_series("wide", wide)]))
+    wm = {w["report_id"]: w["watermark_self_tpm"] for w in result.summary["watermark_changes"]}
+    series_map = {"narrow": narrow, "wide": wide}
+    new_area = _area(wm, series_map)
+    old_area = _area({"narrow": 100_000, "wide": 0}, series_map)  # 旧：narrow 占满容量、wide 饿死
+    assert wm.get("wide", 0) >= wm.get("narrow", 0)   # 常态水位 ≥ 尖峰水位（尖峰被削）
+    assert new_area > old_area                         # 总自建面积严格增大
+
+
+def test_time_period_low_density_not_starved():
+    # Q1：容量紧张下低密度常态客户不再被整个饿死（旧密度贪心会给它 0 水位）。
+    hi = [70_000] * 24     # 高密度常态
+    lo = [70_000] * 24     # 低密度常态
+    result = TimePeriodSolver().solve(_mk([
+        _dem_series("hi", hi, discount=0.9), _dem_series("lo", lo, discount=0.5)]))
+    wm = {w["report_id"]: w["watermark_self_tpm"] for w in result.summary["watermark_changes"]}
+    assert wm.get("lo", 0) > 0    # 低密度客户拿到部分水位，非 0
+
+
+def test_time_period_ample_capacity_no_regression():
+    # Q1：容量充裕(Σpeak ≤ cap)时，各客户都注到各自峰值，与旧结果一致（无退化）。
+    a = [40_000] * 24
+    b = [50_000] * 24     # 合计峰值 90k < 容量 100k
+    result = TimePeriodSolver().solve(_mk([_dem_series("a", a), _dem_series("b", b)]))
+    wm = {w["report_id"]: w["watermark_self_tpm"] for w in result.summary["watermark_changes"]}
+    assert abs(wm.get("a", 0) - 40_000) < 1e-6
+    assert abs(wm.get("b", 0) - 50_000) < 1e-6
+
+
+def test_time_period_spiky_current_self_is_shaved():
+    # 削峰优先（无保底）：当前自建本身是突刺时，其突刺部分会被削峰、挖回三方，
+    # 把容量让给能产出更多收入面积的宽常态客户。
+    # spiky：当前自建比 0.5、需求是尖峰(400k@h0-1, 40k其余)→ 当前自建峰值=200k；密度较低。
+    # wide：全天 150k 常态、密度更高。容量 200k 紧张。
+    spiky = [400_000, 400_000] + [40_000] * 22
+    wide = [150_000] * 24
+    clusters = [{"cluster_name": "c", "deployed_model": "m", "machine_count": 4,
+                 "tpm_per_machine": 50_000, "current_redundant_tpm": 200_000, "current_redundant_machines": 0}]
+    vendors = [{"vendor": "tp", "model": "m", "quota_tpm": 9_000_000, "unit_cost": 0.0002, "unit_price": 0.0010}]
+    prices = {"m": {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.0010, "output_price": 0.0010}}
+
+    def dem(rid, vals, disc, sr):
+        return DemandSnapshotItem(report_id=rid, customer_code=rid, model_name="m", expected_tpm=max(vals),
+                                  expected_rpm=0, discount_rate=disc, input_ratio=1.0, cache_hit_rate=0.0,
+                                  current_self_ratio=sr, current_vendor_ratios={"tp": max(1 - sr, 0)},
+                                  tpm_series=_series24(vals))
+    snap = PolicyInputSnapshot(captured_at=datetime.now(timezone.utc), algorithm="time_period",
+                               demands=[dem("spiky", spiky, 0.6, 0.5), dem("wide", wide, 0.95, 0.0)],
+                               resources={"clusters": clusters}, monitoring={}, vendors=vendors,
+                               params={"model_prices": prices})
+    result = TimePeriodSolver().solve(snap)
+    wm = {w["report_id"]: w["watermark_self_tpm"] for w in result.summary["watermark_changes"]}
+    # spiky 当前自建峰值 = 400k×0.5 = 200k；削峰优先下其水位被削到远低于 200k（突刺挖回三方）
+    assert wm.get("spiky", 1e9) < 200_000 - 1e-6
+    # wide（高密度宽常态）保住其常态水位
+    assert wm.get("wide", 0) >= 150_000 - 1e-6
+    # 不过订：任一时点自建合计 ≤ 物理容量 200k
+    wms = result.summary["watermark_changes"]
+    for ti in range(len(wms[0]["slots"])):
+        assert sum(w["slots"][ti]["self_tpm"] for w in wms) <= 200_000 + 1e-3
+
+
+def test_time_period_shaved_customer_loss_counted_in_gain():
+    # gain 口径（点4）：被完全削光(wm=0)但原本在自建的客户，其损失必须计入 gain（before 含它），不虚高。
+    # winner 高密度、victim 低密度且当前自建 0.5；容量 50k 只够 winner。
+    victim = [60_000] * 24
+    winner = [60_000] * 24
+    clusters = [{"cluster_name": "c", "deployed_model": "m", "machine_count": 1,
+                 "tpm_per_machine": 50_000, "current_redundant_tpm": 50_000, "current_redundant_machines": 0}]
+    vendors = [{"vendor": "tp", "model": "m", "quota_tpm": 9_000_000, "unit_cost": 0.0002, "unit_price": 0.0010}]
+    prices = {"m": {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.0010, "output_price": 0.0010}}
+
+    def dem(rid, vals, disc, sr):
+        return DemandSnapshotItem(report_id=rid, customer_code=rid, model_name="m", expected_tpm=max(vals),
+                                  expected_rpm=0, discount_rate=disc, input_ratio=1.0, cache_hit_rate=0.0,
+                                  current_self_ratio=sr, current_vendor_ratios={"tp": max(1 - sr, 0)},
+                                  tpm_series=_series24(vals))
+    snap = PolicyInputSnapshot(captured_at=datetime.now(timezone.utc), algorithm="time_period",
+                               demands=[dem("winner", winner, 0.95, 0.0), dem("victim", victim, 0.3, 0.5)],
+                               resources={"clusters": clusters}, monitoring={}, vendors=vendors,
+                               params={"model_prices": prices})
+    result = TimePeriodSolver().solve(snap)
+    wm = {w["report_id"]: w for w in result.summary["watermark_changes"]}
+    acc = {a["report_id"] for a in result.summary["accepted_customers"]}
+    # victim 被削光：不在 accepted，但因原本在自建，仍出现在 watermark_changes（wm=0，负收益）
+    assert "victim" not in acc
+    assert "victim" in wm and wm["victim"]["watermark_self_tpm"] < 1e-6
+    assert wm["victim"]["customer_revenue_gain"] < 0   # 当前自建被挖回三方 = 负贡献，已计入 gain
+    # 含被削客户时仍不过订：after 已把 victim 释放，逐时点 Σself ≤ 容量 50k
+    wms = result.summary["watermark_changes"]
+    for ti in range(len(wms[0]["slots"])):
+        assert sum(w["slots"][ti]["self_tpm"] for w in wms) <= 50_000 + 1e-3
+
+
+
+
+
 

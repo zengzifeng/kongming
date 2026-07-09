@@ -37,5 +37,8 @@ class ClusterResource(BaseModel):
 
     current_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     current_redundant_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+    # 当前冗余台数（可供出机器数，录入「自建集群冗余台数」）。求解器 _donatable_machines 的正典键，
+    # 与 current_redundant_tpm 配对；缺省时求解器回退 busy_redundant_machines。
+    current_redundant_machines: Mapped[int] = mapped_column(Integer, default=0)
 
     raw_json: Mapped[dict] = mapped_column(JSON, default=dict)

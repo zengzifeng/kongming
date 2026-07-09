@@ -8,10 +8,10 @@ from sqlalchemy import select
 
 from ..algorithms import build_snapshot, get_solver
 from ..algorithms.base import PolicyInputSnapshot, PolicyResult
+from ..algorithms.usage_demand_source import build_usage_demand_items
 from ..extensions import db
 from ..models import (
     Demand,
-    DemandStatus,
     Policy,
     PolicyAction,
     PolicyRun,
@@ -25,12 +25,22 @@ from ..utils.time import utcnow
 class PolicyService:
     def submit_run(self, algorithm: str, demand_ids: list[int] | None = None,
                    params: dict | None = None, triggered_by: str = "manual") -> PolicyRun:
-        demands = self._load_demands(demand_ids)
-        if not demands:
-            raise ValidationFailed("没有可用的已审批需求用于测算")
+        # 默认（无 demand_ids）：从实跑量 + 平台定价主数据实时构建需求。
+        # demand_ids 有值：手动/报备路径，从 demands 表按 id 取（前端指定新增客户需求评估时用）。
+        if demand_ids:
+            demands = self._load_demands(demand_ids)
+            if not demands:
+                raise ValidationFailed("指定的需求不存在或不可用")
+            snapshot = build_snapshot(algorithm=algorithm, demands=demands, params=params)
+        else:
+            demand_items = build_usage_demand_items()
+            if not demand_items:
+                raise ValidationFailed("没有可用的实跑量需求用于测算")
+            snapshot = build_snapshot(
+                algorithm=algorithm, demand_items=demand_items, params=params,
+                enrich_cluster_redundancy=True,
+            )
 
-        snapshot = build_snapshot(
-            algorithm=algorithm, demands=demands, params=params)
         snapshot_dict = snapshot.to_dict()
         input_hash = hashlib.sha256(
             json.dumps(snapshot_dict, sort_keys=True,
@@ -52,10 +62,9 @@ class PolicyService:
         self._execute(run, snapshot)
         return run
 
-    def _load_demands(self, demand_ids: list[int] | None) -> list[Demand]:
-        stmt = select(Demand).where(Demand.status == DemandStatus.APPROVED)
-        if demand_ids:
-            stmt = select(Demand).where(Demand.id.in_(demand_ids))
+    def _load_demands(self, demand_ids: list[int]) -> list[Demand]:
+        # 手动/报备路径：仅按显式 id 取 demands 表（不再默认扫全表已审批需求）。
+        stmt = select(Demand).where(Demand.id.in_(demand_ids))
         return list(db.session.execute(stmt).scalars())
 
     def _execute(self, run: PolicyRun, snapshot: PolicyInputSnapshot):

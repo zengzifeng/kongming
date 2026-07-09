@@ -45,6 +45,10 @@ class SolverEconomicsMixin:
         return min(matching, key=lambda v: float(v.get("unit_cost", 0) or 0))
 
     def _purchase_discount(self, vendor: dict) -> float:
+        # 优先用录入的采购折扣直值（vendor_quotas.purchase_discount）；缺省(<=0)时回退 unit_cost/unit_price 导出。
+        direct = float(vendor.get("purchase_discount", 0) or 0)
+        if direct > 0:
+            return direct
         unit_cost = float(vendor.get("unit_cost", 0) or 0)
         unit_price = float(vendor.get("unit_price", 0) or 0)
         if unit_price <= 0:
