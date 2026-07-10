@@ -52,14 +52,26 @@ class TimePeriodSolver(SolverEconomicsMixin):
         vendors = snapshot.vendors
         timeline = self._timeline(snapshot.demands)
 
+        # 峰值可行性硬约束基准：逐模型客户波形总需求峰值 / 三方额度 / 需保留的最小自建容量。
+        # min_self_required = max(0, 峰值 − 三方额度)：三方接不住的那部分峰值必须由自建兜底，
+        # 是「机器最多能挪走到什么程度」的物理下限（削峰可把峰值外抛给三方，但外抛不掉的必须留自建）。
+        peak_demand = self._peak_demand_by_model(snapshot.demands, timeline)
+        vendor_cap = self._vendor_cap_by_model(vendors)
+        min_self_required = {m: max(0.0, peak_demand.get(m, 0.0) - vendor_cap.get(m, 0.0))
+                             for m in peak_demand}
+
         # ---- A. 客户经济学（时间不变量）+ B. 需求时序剖面 ----
         candidates, rejected = self._build_candidates(snapshot.demands, vendors, model_prices, timeline)
         candidates.sort(key=lambda c: c.score, reverse=True)
 
         # ---- C. 一次机器重分配：按“每机器边际收入面积”配齐（机会成本加权，不只按峰值台数）----
         machines_before = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
-        node_moves, accepted, rejected = self._plan_reallocation(candidates, clusters, rejected, timeline)
+        node_moves, accepted, rejected = self._plan_reallocation(
+            candidates, clusters, rejected, timeline, min_self_required)
         machines_after = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
+
+        # 成案终检：机器挪动后，逐模型「自建+三方」是否仍覆盖该模型客户波形峰值。
+        feasibility = self._check_peak_feasibility(clusters, peak_demand, vendor_cap)
 
         # 每模型调整后的自建容量（machine_count 已被 _plan_reallocation 就地更新）
         model_self_capacity = self._model_capacity(clusters)
@@ -82,6 +94,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
             candidates, accepted, rejected, revenue_gain, after, node_moves,
             machines_before, machines_after,
         )
+        constraints.append(self._peak_feasibility_constraint(feasibility))
 
         watermark_changes = after["watermarks"]
         actions: list[PolicyActionDraft] = []
@@ -105,6 +118,8 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 "machines_before": machines_before,
                 "machines_after": machines_after,
                 "model_self_capacity": model_self_capacity,
+                "peak_feasibility": feasibility,
+                "min_self_required": min_self_required,
                 # 预警：三方侧亏损（售卖折扣<=采购折扣）的客户，供人工关注是否手动全挪自建
                 "must_move_customers": [
                     {"report_id": c.demand.report_id, "customer_code": c.demand.customer_code}
@@ -133,6 +148,57 @@ class TimePeriodSolver(SolverEconomicsMixin):
             for ts, _ in (d.tpm_series or []):
                 stamps.add(ts)
         return sorted(stamps) if stamps else ["_flat_"]
+
+    # ---------------- 峰值可行性（硬约束基准） ----------------
+    def _peak_demand_by_model(self, demands: list[DemandSnapshotItem], timeline: list[str]) -> dict[str, float]:
+        """逐模型：所有客户波形在同一时点求和后，取全时段峰值 = 该模型客户总需求峰值。"""
+        by_model_ts: dict[str, dict[str, float]] = {}
+        for d in demands:
+            for ts, tpm in self._series_of(d, timeline):
+                by_model_ts.setdefault(d.model_name, {}).setdefault(ts, 0.0)
+                by_model_ts[d.model_name][ts] += float(tpm)
+        return {m: (max(v.values()) if v else 0.0) for m, v in by_model_ts.items()}
+
+    def _vendor_cap_by_model(self, vendors: list[dict]) -> dict[str, float]:
+        cap: dict[str, float] = {}
+        for v in vendors:
+            cap[v.get("model")] = cap.get(v.get("model"), 0.0) + float(v.get("quota_tpm", 0) or 0)
+        return cap
+
+    def _self_cap_by_model(self, clusters: list[dict]) -> dict[str, float]:
+        cap: dict[str, float] = {}
+        for c in clusters:
+            cap[c["deployed_model"]] = cap.get(c["deployed_model"], 0.0) + \
+                float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
+        return cap
+
+    def _check_peak_feasibility(self, clusters, peak_demand, vendor_cap) -> dict:
+        """成案终检：逐模型 自建(调整后)+三方 是否覆盖客户波形峰值。slack<0 即按波形跑会掉量。"""
+        self_cap = self._self_cap_by_model(clusters)
+        out: dict[str, dict] = {}
+        for m, pk in peak_demand.items():
+            total = self_cap.get(m, 0.0) + vendor_cap.get(m, 0.0)
+            out[m] = {
+                "peak_demand": pk,
+                "self_cap": self_cap.get(m, 0.0),
+                "vendor_cap": vendor_cap.get(m, 0.0),
+                "total_cap": total,
+                "slack": total - pk,
+                "feasible": total - pk >= -EPS,
+            }
+        return out
+
+    def _peak_feasibility_constraint(self, feasibility: dict) -> ConstraintHit:
+        worst = min((f["slack"] for f in feasibility.values()), default=0.0)
+        bad = [m for m, f in feasibility.items() if not f["feasible"]]
+        return ConstraintHit(
+            name="model_peak_capacity_sufficient",
+            hit=not bad,
+            threshold=0.0,
+            actual=worst,
+            description="每模型(自建调整后+三方)需覆盖该模型客户波形峰值，否则按波形跑会掉量" +
+                        ("" if not bad else f"；不满足: {bad}"),
+        )
 
     def _series_of(self, demand: DemandSnapshotItem, timeline: list[str]) -> list[tuple[str, float]]:
         if demand.tpm_series:
@@ -187,32 +253,32 @@ class TimePeriodSolver(SolverEconomicsMixin):
         series = self._series_of(cand.demand, timeline)
         return cand.unit_self_revenue * sum(min(rate, max(tpm, 0.0)) for _, tpm in series)
 
-    def _plan_reallocation(self, candidates, clusters, rejected, timeline):
+    def _plan_reallocation(self, candidates, clusters, rejected, timeline, min_self_required):
         """机器一次重分配：仅当某模型**满容量**不足以覆盖其需求时，才从别处搬空闲机器过来。
         就地更新 clusters 的 machine_count；返回 (node_moves, accepted, rejected)。
 
-        两套账本分离，与 Step D 口径对齐：
-        - **可用容量 free = Σ max(0, machine_count×rate − reserved)**（**规划口径**，与 Step D 相同）：
-          决定“是否要搬机器”与接纳。搬运就地改 machine_count（cap_of 实时反映）；`reserved[c]` 记前序
-          客户的预留（clamp 到满容量）→ free 恒 ≥0，不会像“直接扣 full_avail”那样在“先 reserve 后
-          供出”时被扣成负。
-        - native_free = current_redundant_tpm（**物理护栏**）：只作 `_acquire_machines` 的供出上限
-          `min(donatable, native_free//src_rate)`，保证只搬**真正空闲**的机器。只被搬运递减、
-          接收不递增、reserve 不碰 → 恒 ≥0，且“接收的机器不进 native_free 就无法再供出”天然防 relay。
+        供出上限改用**峰值可行性口径**（取代 realtime 的 23:00 瞬时冗余 current_redundant_*）：
+        - min_self_required[m] = max(0, 该模型客户波形峰值 − 三方额度)：三方接不住的峰值必须留自建；
+        - model_slack[m] = 该模型当前自建容量 − min_self_required[m]：**唯一可供出**的自建容量。
+          搬走机器就地递减源模型 slack、递增目标模型 slack，全程 slack≥0 → 任何模型都不会被搬到
+          「按波形跑接不住峰值」的地步。这样：白天满载但深夜空闲的集群不再被误判为可供出。
         """
         by_name = {c["cluster_name"]: c for c in clusters}
         rate_of = {c["cluster_name"]: float(c.get("tpm_per_machine", 0) or 0) for c in clusters}
+        model_of = {c["cluster_name"]: c["deployed_model"] for c in clusters}
         # reserved[c] = 已被前序客户预留的满容量（≤ 该簇满容量）。free 由 machine_count 实时算，
         # 恒 ≥0（不会像"直接扣 full_avail"那样在"先 reserve 后供出"时被扣成负）。
         reserved = {c["cluster_name"]: 0.0 for c in clusters}
 
         def cap_of(name):
             return float(by_name[name].get("machine_count", 0) or 0) * rate_of.get(name, 0.0)
-        native_free = {
-            c["cluster_name"]: max(float(c.get("current_redundant_tpm", 0) or 0), 0.0)
-            for c in clusters
-        }
-        donatable = {c["cluster_name"]: self._donatable_machines(c) for c in clusters}
+        # 峰值可行性供出预算：每模型自建容量中，高于 min_self_required 的部分才可供出（物理护栏）。
+        self_cap_model = self._self_cap_by_model(clusters)
+        model_slack = {m: max(0.0, self_cap_model.get(m, 0.0) - min_self_required.get(m, 0.0))
+                       for m in self_cap_model}
+        # 每集群名义可供出台数 = 机器数 − 最小保留台数（KSCC 等）；真正上限再由 model_slack 约束。
+        donatable = {c["cluster_name"]: max(0, int(c.get("machine_count", 0) or 0) - self._min_reserve_machines(c))
+                     for c in clusters}
         # 每集群「可服务的全部候选」（机会成本用：一台机器留在源集群能承接哪些客户的面积）
         servable_by_cluster: dict[str, list] = {}
         for cand in candidates:
@@ -236,7 +302,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
 
             if need - free > EPS:                   # 满容量真的不够才搬
                 moves = self._acquire_machines(
-                    cand, need - free, servable, clusters, donatable, native_free,
+                    cand, need - free, servable, clusters, donatable, model_slack, model_of,
                     servable_by_cluster, timeline,
                 )
                 for mv in moves:
@@ -244,7 +310,9 @@ class TimePeriodSolver(SolverEconomicsMixin):
                     by_name[src]["machine_count"] -= mv["machine_count"]   # machine_count 就地更新→cap_of 实时反映
                     by_name[tgt]["machine_count"] += mv["machine_count"]
                     donatable[src] -= mv["machine_count"]
-                    native_free[src] = native_free.get(src, 0.0) - mv["removed_tpm"]   # 源失去物理空闲
+                    # 峰值可行性预算：源模型失去自建容量→slack 减；目标模型获得→slack 增。
+                    model_slack[model_of[src]] = model_slack.get(model_of[src], 0.0) - mv["removed_tpm"]
+                    model_slack[model_of[tgt]] = model_slack.get(model_of[tgt], 0.0) + mv["added_tpm"]
                     node_moves.append(mv)
                 free = servable_free(servable)
 
@@ -260,14 +328,15 @@ class TimePeriodSolver(SolverEconomicsMixin):
 
         return node_moves, accepted, rejected
 
-    def _acquire_machines(self, cand, shortfall_tpm, servable, clusters, donatable, native_free,
+    def _acquire_machines(self, cand, shortfall_tpm, servable, clusters, donatable, model_slack, model_of,
                           servable_by_cluster, timeline) -> list[dict]:
         """为承接 `cand` 腾挪机器：目标取可服务集群里“加一台机器边际面积最高”者，源按**机会成本**
         （留在源集群一台机器能承接的最高面积）从低到高选，且**仅当目标增益 > 源机会成本**才搬——
         杜绝“把高产能机器搬到低产能目标只承接很小一段业务”的降面积挪动。
 
-        无需 donor/receiver 互斥：接收的机器不进 native_free（源物理空闲）就无法再供出，真 relay
-        结构上不可能。禁止“同模型 rate 套利”搬运（同模型 + target_rate > src_rate）。"""
+        供出上限受**峰值可行性预算** model_slack 约束（本次调用内用局部副本递减，防同模型多集群
+        在一次调用里合计超额供出）：源模型自建容量必须始终 ≥ min_self_required（三方接不住的峰值）。
+        禁止“同模型 rate 套利”搬运（同模型 + target_rate > src_rate）。"""
         demand = cand.demand
         targets = [c for c in servable if float(c.get("tpm_per_machine", 0) or 0) > 0]
         if not targets:
@@ -303,6 +372,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
         # 机会成本从低到高：最“不值得留在源”的机器先搬
         sources.sort(key=opportunity)
 
+        local_slack = dict(model_slack)   # 本次调用内递减，防同模型多集群合计超额供出
         moves: list[dict] = []
         added = 0.0
         for src in sources:
@@ -313,8 +383,8 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 break  # sources 已按机会成本升序，后续只会更贵，直接停
             name = src["cluster_name"]
             src_rate = float(src.get("tpm_per_machine", 0) or 0)
-            # 安全护栏：可搬走台数受源集群仍空闲的【原生】容量限制，只有 native_free 背书的机器可供出。
-            movable = min(donatable.get(name, 0), int((native_free.get(name, 0.0) + EPS) // src_rate))
+            # 安全护栏：可搬走台数受源模型峰值可行性预算限制——源模型自建须保留 min_self_required。
+            movable = min(donatable.get(name, 0), int((local_slack.get(model_of[name], 0.0) + EPS) // src_rate))
             if movable <= 0:
                 continue
             need_machines = max(1, ceil((shortfall_tpm - added) / target_rate))
@@ -329,6 +399,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 "reason": f"承接优质客户 {demand.customer_code}（每机器面积 {target_gain:.0f} > 源机会成本）",
             })
             added += machines * target_rate
+            local_slack[model_of[name]] = local_slack.get(model_of[name], 0.0) - machines * src_rate
         return moves
 
     def _reserve(self, servable, reserved, cap_of, amount):

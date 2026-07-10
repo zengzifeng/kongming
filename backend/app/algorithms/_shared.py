@@ -77,8 +77,9 @@ class SolverEconomicsMixin:
 
     @staticmethod
     def _min_reserve_machines(cluster: dict) -> int:
-        # KSCC 集群常态最少保留 2 台机器
-        return 2 if "KSCC" in str(cluster.get("cluster_name", "")).upper() else 0
+        # 专属集群（KSCC / XISHANJU）常态最少保留 2 台机器：即使当前无客户跑量也不得供出。
+        name = str(cluster.get("cluster_name", "")).upper()
+        return 2 if ("KSCC" in name or "XISHANJU" in name) else 0
 
     def _donatable_machines(self, cluster: dict) -> int:
         # 可供出机器 = 空闲机器，且不能突破该集群的常态最小保留台数
