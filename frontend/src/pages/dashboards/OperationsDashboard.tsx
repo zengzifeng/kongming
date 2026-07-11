@@ -42,8 +42,8 @@ export function OperationsDashboard() {
         <div className="metric-grid page-section">
           <MetricCard label="待处理需求" value={operations.data?.pending_demands ?? 0} tone="cyan" onClick={() => navigate('/demands')} />
           <MetricCard label="待审批需求/评估" value={operations.data?.pending_evaluations ?? 0} tone="amber" onClick={() => navigate('/demands')} />
-          <MetricCard label="策略条数" value={policies.data?.total ?? 0} tone="purple" onClick={() => navigate('/idle')} />
-          <MetricCard label="今日收益汇总" value={money(operations.data?.revenue_last_24h)} tone="green" onClick={() => navigate('/peak-shaving')} />
+          <MetricCard label="策略条数" value={policies.data?.total ?? 0} tone="purple" onClick={() => navigate('/strategies')} />
+          <MetricCard label="今日收益汇总" value={money(operations.data?.revenue_last_24h)} tone="green" onClick={() => navigate('/strategies')} />
           <MetricCard label="平均资源利用率" value={percent(resources.data?.avg_utilization)} tone="red" onClick={() => navigate('/realtime')} />
         </div>
         <div className="dashboard-grid three overview-domains">
@@ -62,7 +62,7 @@ export function OperationsDashboard() {
             </button>
           </ChartPanel>
           <ChartPanel title="策略概览">
-            <button className="domain-card" onClick={() => navigate('/idle')}>
+            <button className="domain-card" onClick={() => navigate('/strategies')}>
               <strong>{money(policyRevenue)}</strong>
               <span>策略预估收益</span>
               <small>草稿 {operations.data?.draft_policies ?? 0} · 生效 {acceptedPolicies}</small>

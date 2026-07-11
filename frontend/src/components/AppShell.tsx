@@ -1,7 +1,6 @@
 import { Layout, Menu } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
-  AreaChartOutlined,
   DashboardOutlined,
   DatabaseOutlined,
   FundProjectionScreenOutlined,
@@ -13,10 +12,8 @@ const { Sider, Content } = Layout;
 const items = [
   { key: '/overview', icon: <DashboardOutlined />, label: '运营总览' },
   { key: '/demands', icon: <DatabaseOutlined />, label: '需求看板' },
-  { key: '/realtime', icon: <NodeIndexOutlined />, label: '实时看板' },
-  { key: '/idle', icon: <FundProjectionScreenOutlined />, label: '闲时看板' },
-  { key: '/busy', icon: <FundProjectionScreenOutlined />, label: '忙时看板' },
-  { key: '/peak-shaving', icon: <AreaChartOutlined />, label: '削峰看板' },
+  { key: '/realtime', icon: <NodeIndexOutlined />, label: '资源看板' },
+  { key: '/strategies', icon: <FundProjectionScreenOutlined />, label: '策略看板' },
 ];
 
 function selectedKey(pathname: string) {

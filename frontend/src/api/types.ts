@@ -141,8 +141,11 @@ export interface VendorQuota extends BaseEntity {
   vendor: string;
   model: string;
   quota_tpm: number;
+  actual_tpm: number;
+  actual_redundant_tpm: number;
   unit_cost: number;
   unit_price: number;
+  purchase_discount: number;
   effective_from: string;
   effective_to: string | null;
   status: string;
@@ -215,6 +218,12 @@ export interface ResourceCluster {
   tpm_per_machine_w?: number;
   total_capacity_tpm: number;
   total_capacity_w?: number;
+  peak_tpm_idle?: number;
+  idle_redundant_tpm?: number;
+  idle_redundant_machines?: number;
+  peak_tpm_busy?: number;
+  busy_redundant_tpm?: number;
+  busy_redundant_machines?: number;
   current_tpm: number;
   current_tpm_w?: number;
   current_redundant_tpm: number;

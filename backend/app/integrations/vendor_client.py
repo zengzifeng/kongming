@@ -21,9 +21,12 @@ VendorQuota = VendorQuotaDTO
 
 
 _SEED = [
-    ("openai", "gpt-4o-mini", 400_000, 0.0008, 0.0015, "OpenAI 官方"),
-    ("aliyun", "qwen2.5-72b", 800_000, 0.0004, 0.0010, "阿里云百炼"),
-    ("volc", "deepseek-v3", 1_200_000, 0.0003, 0.0009, "火山方舟"),
+    ("百度", "glm-5.2", 12_000_000, 0.75, "供应量级 1200 万 TPM"),
+    ("鼎鼎方游（腾讯渠道）", "glm-5.2", 50_000_000, 0.73, "供应量级 5000 万 TPM"),
+    ("香港锦望", "glm-5.2", 10_000_000, 0.55, "供应量级 1000 万 TPM"),
+    ("月暗原厂", "kimi-k2.5", 60_000_000, 0.80, "供应量级 6000 万 TPM"),
+    ("月暗原厂", "kimi-k2.6", 100_000_000, 0.80, "供应量级 10000 万 TPM"),
+    ("百度", "deepseek-v32", 12_000_000, 0.40, "供应量级 1200 万 TPM"),
 ]
 
 
@@ -72,15 +75,19 @@ class VendorClient:
         from ..models import VendorQuota as VendorQuotaModel
 
         created = []
-        for vendor, model, quota, cost, price, notes in _SEED:
+        for vendor, model, quota, discount, notes in _SEED:
             row = VendorQuotaModel(
                 vendor=vendor,
                 model=model,
                 quota_tpm=quota,
-                unit_cost=cost,
-                unit_price=price,
+                actual_tpm=0,
+                actual_redundant_tpm=quota,
+                unit_cost=0,
+                unit_price=0,
+                purchase_discount=discount,
                 effective_from=now - timedelta(days=1),
                 notes=notes,
+                raw_json={"source": "manual-image", "quota_w": quota / 10000},
             )
             db.session.add(row)
             created.append(row)

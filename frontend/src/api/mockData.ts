@@ -289,6 +289,25 @@ const policies: Policy[] = [
     created_at: '2026-06-28T10:21:00+08:00',
     updated_at: now,
   },
+  {
+    id: 505,
+    policy_run_id: 403,
+    policy_no: 'POL-BUSY-0712A',
+    algorithm: 'time_period',
+    summary_json: { template: '忙时策略', module: 'busy', target: '跨模型机器腾挪与切量水位线再平衡', window: '09:00-21:00' },
+    expected_revenue_gain: 34902,
+    expected_peak_shaving_gain: 34902,
+    expected_off_peak_gain: 0,
+    constraints_json: { protect_peak_hours: ['09:00-12:00', '18:00-21:00'], keep_peak_feasible: true, rebalance_mode: 'target-rate' },
+    status: 'draft',
+    accepted_by: null,
+    accepted_at: null,
+    cancel_reason: null,
+    effective_from: '2026-07-12T09:00:00+08:00',
+    effective_to: '2026-07-12T21:00:00+08:00',
+    created_at: '2026-07-12T01:20:00+08:00',
+    updated_at: now,
+  },
 ];
 
 const policyActions: PolicyAction[] = [
@@ -297,12 +316,18 @@ const policyActions: PolicyAction[] = [
   { id: 603, policy_id: 502, action_type: 'shift_to_off_peak', payload_json: { from: '14:00-18:00', to: '00:00-07:00', demand_ids: [102] }, expected_gain: 76000, created_at: now, updated_at: now },
   { id: 604, policy_id: 503, action_type: 'soft_throttle', payload_json: { model: 'ERNIE-Lite', ratio: 0.08 }, expected_gain: 88000, created_at: now, updated_at: now },
   { id: 605, policy_id: 504, action_type: 'reserve_capacity', payload_json: { node_group: 'embedding-pool', tpm: 120000 }, expected_gain: 64000, created_at: now, updated_at: now },
+  { id: 606, policy_id: 505, action_type: 'rebalance_machine_flow', payload_json: { from: 'GLM-5.2', to: 'kimi-k2.5-nvfp4-mihayou', machines: 10, gain_yuan_day: 17576 }, expected_gain: 17576, created_at: now, updated_at: now },
+  { id: 607, policy_id: 505, action_type: 'rebalance_machine_flow', payload_json: { from: 'GLM-5.2', to: 'GLM-5.1-FP8', machines: 12, gain_yuan_day: 16643 }, expected_gain: 16643, created_at: now, updated_at: now },
+  { id: 608, policy_id: 505, action_type: 'rebalance_machine_flow', payload_json: { from: 'GLM-5.1-KSCC', to: 'kimi-k2.6-mihayou', machines: 1, gain_yuan_day: 683 }, expected_gain: 683, created_at: now, updated_at: now },
 ];
 
 const vendorQuotas: VendorQuota[] = [
-  { id: 701, vendor: 'Baidu Cloud', model: 'ERNIE-4.5-Turbo', quota_tpm: 600000, unit_cost: 0.012, unit_price: 0.021, effective_from: '2026-06-01T00:00:00+08:00', effective_to: null, status: 'active', contact: 'bd-cloud@demo', notes: 'P0 客户可临时扩容', raw_json: { sla: '99.9%', burst_ratio: 1.2 }, created_at: now, updated_at: now },
-  { id: 702, vendor: 'Qianfan Partner', model: 'ERNIE-Speed-128K', quota_tpm: 360000, unit_cost: 0.006, unit_price: 0.012, effective_from: '2026-06-10T00:00:00+08:00', effective_to: null, status: 'active', contact: 'partner@demo', notes: '适合低峰批处理', raw_json: { sla: '99.5%', region: '华北' }, created_at: now, updated_at: now },
-  { id: 703, vendor: 'GPU Vendor A', model: 'Embedding-V2', quota_tpm: 240000, unit_cost: 0.003, unit_price: 0.008, effective_from: '2026-06-15T00:00:00+08:00', effective_to: '2026-07-15T00:00:00+08:00', status: 'active', contact: 'gpu-a@demo', notes: '短期促销资源', raw_json: { promotion: true }, created_at: now, updated_at: now },
+  { id: 701, vendor: '百度', model: 'glm-5.2', quota_tpm: 12000000, actual_tpm: 0, actual_redundant_tpm: 12000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.75, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1200 万 TPM', raw_json: { source: 'manual-image', quota_w: 1200 }, created_at: now, updated_at: now },
+  { id: 702, vendor: '鼎鼎方游（腾讯渠道）', model: 'glm-5.2', quota_tpm: 50000000, actual_tpm: 0, actual_redundant_tpm: 50000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.73, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 5000 万 TPM', raw_json: { source: 'manual-image', quota_w: 5000 }, created_at: now, updated_at: now },
+  { id: 703, vendor: '香港锦望', model: 'glm-5.2', quota_tpm: 10000000, actual_tpm: 0, actual_redundant_tpm: 10000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.55, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1000 万 TPM', raw_json: { source: 'manual-image', quota_w: 1000 }, created_at: now, updated_at: now },
+  { id: 704, vendor: '月暗原厂', model: 'kimi-k2.5', quota_tpm: 60000000, actual_tpm: 0, actual_redundant_tpm: 60000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.8, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 6000 万 TPM', raw_json: { source: 'manual-image', quota_w: 6000 }, created_at: now, updated_at: now },
+  { id: 705, vendor: '月暗原厂', model: 'kimi-k2.6', quota_tpm: 100000000, actual_tpm: 0, actual_redundant_tpm: 100000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.8, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 10000 万 TPM', raw_json: { source: 'manual-image', quota_w: 10000 }, created_at: now, updated_at: now },
+  { id: 706, vendor: '百度', model: 'deepseek-v32', quota_tpm: 12000000, actual_tpm: 0, actual_redundant_tpm: 12000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.4, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1200 万 TPM', raw_json: { source: 'manual-image', quota_w: 1200 }, created_at: now, updated_at: now },
 ];
 
 const resourceDashboard: ResourceDashboard = {

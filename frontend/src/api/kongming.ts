@@ -1,6 +1,6 @@
 import { apiClient } from './client';
 import { mockApi } from './mockData';
-import type { ResourceCluster, ResourceDashboard } from './types';
+import type { Paginated, QueryParams, ResourceCluster, ResourceDashboard, VendorQuota } from './types';
 
 export const dashboardsApi = {
   ...mockApi.dashboards,
@@ -29,7 +29,16 @@ export const policiesApi = mockApi.policies;
 
 export const revenueApi = mockApi.revenue;
 
-export const vendorsApi = mockApi.vendors;
+export const vendorsApi = {
+  ...mockApi.vendors,
+  quotas: async (query: QueryParams): Promise<Paginated<VendorQuota>> => {
+    try {
+      return await apiClient.get<Paginated<VendorQuota>>('/api/v1/vendors/quotas', query);
+    } catch {
+      return mockApi.vendors.quotas(query);
+    }
+  },
+};
 
 export const alertsApi = mockApi.alerts;
 
