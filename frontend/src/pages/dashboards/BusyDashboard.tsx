@@ -56,7 +56,10 @@ export function BusyDashboard() {
   const [submitting, setSubmitting] = useState(false);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
   const busyPolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'off_peak'), [policies.data?.items]);
-  const totalGain = busyPolicies.reduce((sum, item) => sum + Number(item.expected_revenue_gain || 0), 0);
+  const revenueBars = busyPolicies.length
+    ? busyPolicies.map((item) => ({ name: item.policy_no, gain: Number(item.expected_revenue_gain || 0) }))
+    : [{ name: 'POL-OFFPEAK-0627B', gain: 132000 }];
+  const totalGain = revenueBars.reduce((sum, item) => sum + item.gain, 0);
 
   async function createRun() {
     setSubmitting(true);
@@ -114,33 +117,33 @@ export function BusyDashboard() {
     <>
       <PageHeader eyebrow="Busy" title="忙时看板" description="展示白天集群跑量、冗余机器台数、调整建议、收益预估与历史收益偏差。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成忙时策略</Button>} />
       <Spin spinning={policies.loading}>
-        <div className="wire-grid page-section">
-          <section className="wire-card dashboard-panel-wide">
+        <div className="busy-board page-section">
+          <section className="wire-card busy-panel">
             <div className="wire-card-title">集群维度白天跑量</div>
-            <div className="resource-chart tall-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dayRuntime}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="time" /><YAxis /><Tooltip /><Line type="monotone" dataKey="clusterA" name="Cluster-A" stroke="#27d7ff" /><Line type="monotone" dataKey="clusterB" name="Cluster-B" stroke="#5dffb2" /><Line type="monotone" dataKey="clusterC" name="Cluster-C" stroke="#9b8cff" /><Line type="monotone" dataKey="fit" name="白天拟合" stroke="#ffb347" strokeDasharray="5 5" /></LineChart></ResponsiveContainer></div>
+            <div className="resource-chart busy-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dayRuntime}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="time" /><YAxis domain={[0, 1000]} /><Tooltip /><Line type="monotone" dataKey="clusterA" name="Cluster-A" stroke="#27d7ff" strokeWidth={2} dot={{ r: 3 }} /><Line type="monotone" dataKey="clusterB" name="Cluster-B" stroke="#5dffb2" strokeWidth={2} dot={{ r: 3 }} /><Line type="monotone" dataKey="clusterC" name="Cluster-C" stroke="#9b8cff" strokeWidth={2} dot={{ r: 3 }} /><Line type="monotone" dataKey="fit" name="白天拟合" stroke="#ffb347" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3 }} /></LineChart></ResponsiveContainer></div>
           </section>
 
-          <section className="wire-card dashboard-panel-wide">
+          <section className="wire-card busy-panel">
             <div className="wire-card-title">每个集群冗余机器台数</div>
-            <div className="resource-chart tall-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={redundantMachines}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="cluster" /><YAxis /><Tooltip /><Bar dataKey="machines" name="冗余机器台数" radius={[10, 10, 4, 4]}>{redundantMachines.map((_, index) => <Cell key={index} fill={clusterBarColors[index % clusterBarColors.length]} />)}</Bar></BarChart></ResponsiveContainer></div>
+            <div className="resource-chart busy-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={redundantMachines}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="cluster" /><YAxis domain={[0, 8]} /><Tooltip /><Bar dataKey="machines" name="冗余机器台数" radius={[10, 10, 4, 4]}>{redundantMachines.map((_, index) => <Cell key={index} fill={clusterBarColors[index % clusterBarColors.length]} />)}</Bar></BarChart></ResponsiveContainer></div>
           </section>
 
-          <section className="wire-card dashboard-panel-wide">
+          <section className="wire-card busy-panel busy-plan-panel">
             <div className="wire-card-title">调整方案建议</div>
-            <Table size="small" rowKey="cluster" dataSource={clusterPlans} pagination={false} columns={[{ title: '集群', dataIndex: 'cluster' }, { title: '承接客户', dataIndex: 'customer' }, { title: '调整方案', dataIndex: 'move' }, { title: '水位线', dataIndex: 'watermark' }, { title: '冗余台数', dataIndex: 'redundant', render: numberText }]} />
-            {busyPolicies.length ? <Table<Policy> className="inner-table" size="small" rowKey="id" dataSource={busyPolicies} pagination={{ pageSize: 4 }} scroll={{ x: 'max-content' }} onRow={(record) => ({ onClick: () => openDetail(record) })} columns={[{ title: '策略编号', dataIndex: 'policy_no' }, { title: '算法', dataIndex: 'algorithm' }, { title: '预估收益', dataIndex: 'expected_revenue_gain', render: money }, { title: '生效时间', dataIndex: 'effective_from', render: dateText }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} /> : <EmptyState />}
+            <Table className="busy-table" size="small" rowKey="cluster" dataSource={clusterPlans} pagination={false} columns={[{ title: '集群', dataIndex: 'cluster' }, { title: '承接客户', dataIndex: 'customer' }, { title: '调整方案', dataIndex: 'move' }, { title: '水位线', dataIndex: 'watermark' }, { title: '冗余', dataIndex: 'redundant', render: numberText }]} />
+            {busyPolicies.length ? <Table<Policy> className="inner-table busy-table" size="small" rowKey="id" dataSource={busyPolicies} pagination={{ pageSize: 4, simple: true }} scroll={{ x: 'max-content' }} onRow={(record) => ({ onClick: () => openDetail(record) })} columns={[{ title: '策略编号', dataIndex: 'policy_no' }, { title: '算法', dataIndex: 'algorithm' }, { title: '预估收益', dataIndex: 'expected_revenue_gain', render: money }, { title: '生效时间', dataIndex: 'effective_from', render: dateText }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} /> : <EmptyState />}
           </section>
 
-          <section className="wire-card">
+          <section className="wire-card busy-panel busy-revenue-panel">
             <div className="wire-card-title">预估收益</div>
             <div className="circle-metric solo-metric"><strong>{money(totalGain)}</strong><span>忙时预估收益</span></div>
-            <div className="resource-chart short-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={busyPolicies.map((item) => ({ name: item.policy_no, gain: item.expected_revenue_gain }))}><XAxis dataKey="name" /><YAxis /><Tooltip /><Bar dataKey="gain" name="预估收益" fill="#ffb347" /></BarChart></ResponsiveContainer></div>
+            <div className="resource-chart busy-revenue-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={revenueBars}><XAxis dataKey="name" /><YAxis /><Tooltip /><Bar dataKey="gain" name="预估收益" fill="#ffb347" /></BarChart></ResponsiveContainer></div>
           </section>
 
-          <section className="wire-card">
+          <section className="wire-card busy-panel busy-history-panel">
             <div className="wire-card-title">历史收益累计及实际收益偏差分析</div>
-            <div className="resource-chart short-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={revenueTrend}><XAxis dataKey="day" /><YAxis /><Tooltip /><Line type="monotone" dataKey="expected" name="预估收益" stroke="#27d7ff" /><Line type="monotone" dataKey="actual" name="实际收益" stroke="#5dffb2" /><Line type="monotone" dataKey="gap" name="收益偏差" stroke="#ff5f6d" /></LineChart></ResponsiveContainer></div>
-            <Table size="small" rowKey="day" dataSource={revenueTrend.slice(-4)} pagination={false} columns={[{ title: '日期', dataIndex: 'day' }, { title: '预估', dataIndex: 'expected', render: money }, { title: '实际', dataIndex: 'actual', render: money }, { title: '偏差', dataIndex: 'gap', render: money }]} />
+            <div className="resource-chart busy-history-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={revenueTrend}><XAxis dataKey="day" /><YAxis /><Tooltip /><Line type="monotone" dataKey="expected" name="预估收益" stroke="#27d7ff" /><Line type="monotone" dataKey="actual" name="实际收益" stroke="#5dffb2" /><Line type="monotone" dataKey="gap" name="收益偏差" stroke="#ff5f6d" /></LineChart></ResponsiveContainer></div>
+            <Table className="busy-table" size="small" rowKey="day" dataSource={revenueTrend.slice(-4)} pagination={false} columns={[{ title: '日期', dataIndex: 'day' }, { title: '预估', dataIndex: 'expected', render: money }, { title: '实际', dataIndex: 'actual', render: money }, { title: '偏差', dataIndex: 'gap', render: money }]} />
           </section>
         </div>
       </Spin>

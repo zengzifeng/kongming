@@ -4,7 +4,6 @@ import { useMemo, useState } from 'react';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusTag } from '../../components/StatusTag';
 import { JsonBlock } from '../../components/JsonBlock';
-import { EmptyState } from '../../components/EmptyState';
 import { policiesApi } from '../../api/kongming';
 import type { Policy, PolicyDetail } from '../../api/types';
 import { useAsync } from '../../hooks/useAsync';
@@ -12,23 +11,40 @@ import { dateText, money, numberText } from '../../utils/format';
 import { parseJsonObject } from '../../utils/json';
 
 const peakRuntime = [
-  { time: '09:00', actual: 520, p90: 610, p99: 760, movingAvg: 540, suggestedLine: 680 },
-  { time: '10:00', actual: 640, p90: 620, p99: 780, movingAvg: 590, suggestedLine: 690 },
-  { time: '11:00', actual: 820, p90: 660, p99: 810, movingAvg: 680, suggestedLine: 710 },
-  { time: '12:00', actual: 760, p90: 690, p99: 840, movingAvg: 710, suggestedLine: 720 },
-  { time: '13:00', actual: 920, p90: 720, p99: 880, movingAvg: 760, suggestedLine: 740 },
-  { time: '14:00', actual: 700, p90: 710, p99: 860, movingAvg: 730, suggestedLine: 735 },
-  { time: '15:00', actual: 660, p90: 690, p99: 830, movingAvg: 705, suggestedLine: 720 },
+  { time: '09:00', clusterA: 520, clusterB: 620, clusterC: 680, clusterD: 750, watermark: 760 },
+  { time: '10:00', clusterA: 610, clusterB: 690, clusterC: 650, clusterD: 780, watermark: 760 },
+  { time: '11:00', clusterA: 820, clusterB: 710, clusterC: 690, clusterD: 800, watermark: 760 },
+  { time: '12:00', clusterA: 760, clusterB: 710, clusterC: 700, clusterD: 850, watermark: 760 },
+  { time: '13:00', clusterA: 920, clusterB: 740, clusterC: 720, clusterD: 900, watermark: 760 },
+  { time: '14:00', clusterA: 700, clusterB: 720, clusterC: 690, clusterD: 870, watermark: 760 },
+  { time: '15:00', clusterA: 660, clusterB: 700, clusterC: 680, clusterD: 840, watermark: 760 },
 ];
 
 const shavingResources = [
-  { cluster: 'Cluster-A', redundant: 360, gain: 1800, action: '超过水位线部分切至三方', ratio: '18%' },
-  { cluster: 'Cluster-B', redundant: 420, gain: 2200, action: '移动平均上沿限流', ratio: '22%' },
-  { cluster: 'Cluster-C', redundant: 290, gain: 1300, action: 'P99 保护，P90 以上削峰', ratio: '15%' },
+  { cluster: 'Cluster-A', redundant: 360, gain: 1800 },
+  { cluster: 'Cluster-B', redundant: 420, gain: 2200 },
+  { cluster: 'Cluster-C', redundant: 290, gain: 1300 },
+];
+
+const clusterActions = [
+  { cluster: 'Cluster-A', move: '水位线以上切三方', watermark: '760 TPM', protected: 'P0/P1' },
+  { cluster: 'Cluster-B', move: '峰值时段柔性限流', watermark: '760 TPM', protected: 'P0/P1' },
+  { cluster: 'Cluster-C', move: '低毛利流量后移', watermark: '720 TPM', protected: 'P1' },
+  { cluster: 'Cluster-D', move: '保留 P99 容量', watermark: '840 TPM', protected: 'P0' },
+];
+
+const shavingForecast = [
+  { date: '2026/6/1', before: 5500, after: 4000, shaved: 1500, beforeMachines: 33, afterMachines: 30 },
+  { date: '2026/6/2', before: 5350, after: 4000, shaved: 1350, beforeMachines: 33, afterMachines: 29 },
+  { date: '2026/6/3', before: 5740, after: 4000, shaved: 1740, beforeMachines: 33, afterMachines: 28 },
+];
+
+const forecastPolicies = [
+  { policyNo: 'POL-PEAK-0627C', expectedGain: 98000, status: 'accepted' },
 ];
 
 const revenueTrend = [
-  { day: 'D-6', expected: 1800, actual: 1600, gap: -200 },
+  { day: 'D-6', expected: 1700, actual: 1600, gap: -100 },
   { day: 'D-5', expected: 2300, actual: 2380, gap: 80 },
   { day: 'D-4', expected: 2600, actual: 2500, gap: -100 },
   { day: 'D-3', expected: 3100, actual: 3320, gap: 220 },
@@ -49,7 +65,7 @@ export function PeakShavingDashboard() {
   const [submitting, setSubmitting] = useState(false);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
   const peakPolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'peak_shaving'), [policies.data?.items]);
-  const totalGain = peakPolicies.reduce((sum, item) => sum + Number(item.expected_peak_shaving_gain || item.expected_revenue_gain || 0), 0);
+  const displayGain = 98661.89;
   const resourceGain = shavingResources.reduce((sum, item) => sum + item.gain, 0);
 
   async function createRun() {
@@ -108,49 +124,71 @@ export function PeakShavingDashboard() {
     <>
       <PageHeader eyebrow="Peak Shaving" title="削峰看板" description="按照削峰逻辑展示集群实跑、水位线建议、削峰后资源冗余与收益。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成削峰策略</Button>} />
       <Spin spinning={policies.loading}>
-        <div className="wire-grid page-section peak-grid">
-          <section className="wire-card dashboard-panel-wide">
+        <div className="wire-grid page-section peak-grid peak-dashboard-grid">
+          <section className="wire-card peak-panel peak-runtime-panel">
             <div className="wire-card-title">集群实跑及建议切量水位线展示</div>
-            <div className="resource-chart tall-chart">
+            <div className="resource-chart peak-line-chart">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={peakRuntime}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis />
+                <LineChart data={peakRuntime} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+                  <CartesianGrid strokeDasharray="2 3" stroke="rgba(230, 247, 255, .38)" />
+                  <XAxis dataKey="time" tick={{ fill: '#7fa5b7', fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis domain={[0, 1000]} tick={{ fill: '#7fa5b7', fontSize: 12 }} axisLine={false} tickLine={false} />
                   <Tooltip />
-                  <Line type="monotone" dataKey="actual" name="各集群实跑" stroke="#27d7ff" strokeWidth={2} />
-                  <Line type="monotone" dataKey="p90" name="P90" stroke="#5dffb2" />
-                  <Line type="monotone" dataKey="p99" name="P99" stroke="#ff5f6d" />
-                  <Line type="monotone" dataKey="movingAvg" name="移动平均" stroke="#9b8cff" strokeDasharray="5 5" />
-                  <Line type="monotone" dataKey="suggestedLine" name="建议切水位线" stroke="#ffb347" strokeWidth={2} />
+                  <Line type="monotone" dataKey="clusterA" name="Cluster-A" stroke="#27d7ff" strokeWidth={2} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="clusterB" name="Cluster-B" stroke="#5dffb2" strokeWidth={2} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="clusterC" name="Cluster-C" stroke="#ffb347" strokeWidth={2} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="clusterD" name="Cluster-D" stroke="#ff9fb0" strokeWidth={2} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="watermark" name="建议水位线" stroke="#ffd166" strokeDasharray="2 4" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           </section>
 
-          <section className="wire-card dashboard-panel-wide">
+          <section className="wire-card peak-panel peak-resource-panel">
             <div className="wire-card-title">削峰后资源情况及收益情况</div>
-            <div className="metric-strip">
+            <div className="metric-strip peak-metric-strip">
               <div><span>削峰后冗余 TPM</span><strong>{numberText(shavingResources.reduce((sum, item) => sum + item.redundant, 0))}</strong></div>
               <div><span>建议方案数</span><strong>{numberText(shavingResources.length)}</strong></div>
               <div><span>资源收益</span><strong>{money(resourceGain)}</strong></div>
             </div>
-            <div className="split-panel">
-              <div className="resource-chart short-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={shavingResources}><XAxis dataKey="cluster" /><YAxis /><Tooltip /><Bar dataKey="redundant" name="削峰后冗余" fill="#27d7ff" /><Bar dataKey="gain" name="收益" fill="#5dffb2" /></BarChart></ResponsiveContainer></div>
-              <Table size="small" rowKey="cluster" dataSource={shavingResources} pagination={false} columns={[{ title: '集群', dataIndex: 'cluster' }, { title: '建议方案', dataIndex: 'action' }, { title: '切量比例', dataIndex: 'ratio' }, { title: '释放 TPM', dataIndex: 'redundant', render: numberText }, { title: '收益', dataIndex: 'gain', render: money }]} />
+            <div className="resource-chart peak-bar-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={shavingResources} margin={{ top: 8, right: 6, bottom: 0, left: -12 }}>
+                  <CartesianGrid strokeDasharray="2 3" vertical={false} stroke="rgba(230, 247, 255, .28)" />
+                  <XAxis dataKey="cluster" tick={{ fill: '#7fa5b7', fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: '#7fa5b7', fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <Tooltip />
+                  <Bar dataKey="redundant" name="削峰后冗余 TPM" fill="#27d7ff" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="gain" name="资源收益" fill="#5dffb2" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
+            <Table size="small" rowKey="cluster" className="peak-compact-table" dataSource={clusterActions} pagination={false} scroll={{ x: 'max-content' }} columns={[{ title: '集群', dataIndex: 'cluster' }, { title: '腾挪资源方案', dataIndex: 'move' }, { title: '划水位线方案', dataIndex: 'watermark' }, { title: '保护层级', dataIndex: 'protected' }]} />
           </section>
 
-          <section className="wire-card">
+          <section className="wire-card peak-panel peak-forecast-panel">
             <div className="wire-card-title">削峰调整方案预估收益</div>
-            <div className="circle-metric solo-metric"><strong>{money(totalGain || resourceGain)}</strong><span>削峰预估收益</span></div>
-            {peakPolicies.length ? <Table<Policy> size="small" rowKey="id" dataSource={peakPolicies} pagination={{ pageSize: 5 }} scroll={{ x: 'max-content' }} onRow={(record) => ({ onClick: () => openDetail(record) })} columns={[{ title: '策略编号', dataIndex: 'policy_no' }, { title: '预估收益', dataIndex: 'expected_revenue_gain', render: money }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} /> : <EmptyState />}
+            <div className="circle-metric peak-gain-metric"><strong>{money(displayGain)}</strong><span>定向搬迁新增收入</span></div>
+            <Table size="small" rowKey="date" className="peak-compact-table" dataSource={shavingForecast} pagination={false} scroll={{ x: 'max-content' }} columns={[{ title: '日期', dataIndex: 'date' }, { title: '削峰前 TPM', dataIndex: 'before', render: numberText }, { title: '削峰后 TPM', dataIndex: 'after', render: numberText }, { title: '削峰 TPM', dataIndex: 'shaved', render: numberText }, { title: '削峰前机器台数', dataIndex: 'beforeMachines', render: numberText }, { title: '削峰后机器台数', dataIndex: 'afterMachines', render: numberText }]} />
+            <Table size="small" rowKey="policyNo" className="peak-compact-table peak-policy-table" dataSource={forecastPolicies} pagination={false} onRow={() => ({ onClick: () => peakPolicies[0] && openDetail(peakPolicies[0]) })} columns={[{ title: '策略编号', dataIndex: 'policyNo' }, { title: '预估收益', dataIndex: 'expectedGain', render: money }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} />
           </section>
 
-          <section className="wire-card">
+          <section className="wire-card peak-panel peak-history-panel">
             <div className="wire-card-title">历史收益累计及实际收益偏差分析</div>
-            <div className="resource-chart short-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={revenueTrend}><XAxis dataKey="day" /><YAxis /><Tooltip /><Line type="monotone" dataKey="expected" name="预估收益" stroke="#27d7ff" /><Line type="monotone" dataKey="actual" name="实际收益" stroke="#5dffb2" /><Line type="monotone" dataKey="gap" name="收益偏差" stroke="#ff5f6d" /></LineChart></ResponsiveContainer></div>
-            <Table size="small" rowKey="day" dataSource={revenueTrend.slice(-4)} pagination={false} columns={[{ title: '日期', dataIndex: 'day' }, { title: '预估', dataIndex: 'expected', render: money }, { title: '实际', dataIndex: 'actual', render: money }, { title: '偏差', dataIndex: 'gap', render: money }]} />
+            <div className="resource-chart peak-history-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={revenueTrend} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+                  <CartesianGrid strokeDasharray="2 3" stroke="rgba(230, 247, 255, .26)" />
+                  <XAxis dataKey="day" tick={{ fill: '#7fa5b7', fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: '#7fa5b7', fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="expected" name="预估收益" stroke="#27d7ff" strokeWidth={2} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="actual" name="实际收益" stroke="#5dffb2" strokeWidth={2} dot={{ r: 3 }} />
+                  <Line type="monotone" dataKey="gap" name="收益偏差" stroke="#ff9fb0" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <Table size="small" rowKey="day" className="peak-compact-table" dataSource={revenueTrend.slice(-4)} pagination={false} columns={[{ title: '日期', dataIndex: 'day' }, { title: '预估', dataIndex: 'expected', render: money }, { title: '实际', dataIndex: 'actual', render: money }, { title: '偏差', dataIndex: 'gap', render: money }]} />
           </section>
         </div>
       </Spin>

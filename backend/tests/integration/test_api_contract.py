@@ -52,6 +52,53 @@ def test_dashboard_resources_contract(client):
         assert "capacity_tpm" in node
         assert "available_tpm" in node
         assert "utilization" in node
+    if data["clusters"]:
+        cluster = data["clusters"][0]
+        assert "provider" in cluster
+        assert "tpm_per_machine_w" in cluster
+        assert "current_redundant_machines" in cluster
+        assert "cluster_utilization" in cluster
+
+
+def test_update_cluster_tpm_per_machine_recalculates_and_persists(client, app):
+    from app.extensions import db
+    from app.models import ClusterResource
+    from app.utils.time import utcnow
+
+    with app.app_context():
+        db.session.add(ClusterResource(
+            snapshot_date=utcnow().date(),
+            cluster_name="db-glm",
+            deployed_model="GLM-5.2",
+            machine_count=2,
+            tpm_per_machine=2_000_000,
+            total_capacity_tpm=4_000_000,
+            current_tpm=1_500_000,
+            current_redundant_tpm=2_500_000,
+            current_redundant_machines=1,
+            raw_json={"provider": "ksyun-glm"},
+        ))
+        db.session.commit()
+
+    res = client.patch("/api/v1/dashboard/resources/clusters", json={
+        "cluster_name": "db-glm",
+        "deployed_model": "GLM-5.2",
+        "tpm_per_machine_w": 260,
+    })
+    assert res.status_code == 200, res.json
+    data = res.json["data"]
+    assert data["tpm_per_machine_w"] == 260
+    assert data["total_capacity_w"] == 520
+    assert data["current_redundant_w"] == 370
+    assert data["current_redundant_machines"] == 1
+
+    with app.app_context():
+        row = db.session.query(ClusterResource).filter_by(cluster_name="db-glm", deployed_model="GLM-5.2").one()
+        assert float(row.tpm_per_machine) == 2_600_000
+        assert float(row.total_capacity_tpm) == 5_200_000
+        assert float(row.current_redundant_tpm) == 3_700_000
+        assert row.current_redundant_machines == 1
+        assert row.raw_json["单台承接能力_wTPM"] == 260
 
 
 def test_dashboard_management_contract(client):

@@ -1,227 +1,445 @@
-import { Button, Form, Input, Progress, Select, Spin, Table } from 'antd';
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip, Line, LineChart, XAxis, YAxis } from 'recharts';
-import { useMemo, useState } from 'react';
+import { Button, Form, Input, InputNumber, message, Select, Table } from 'antd';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { dashboardsApi } from '../../api/kongming';
 import { PageHeader } from '../../components/PageHeader';
-import { JsonBlock } from '../../components/JsonBlock';
-import { EmptyState } from '../../components/EmptyState';
-import { ErrorState } from '../../components/ErrorState';
-import { dashboardsApi, demandsApi, vendorsApi } from '../../api/kongming';
-import { useAsync } from '../../hooks/useAsync';
 import { numberText, percent } from '../../utils/format';
-import type { Demand, ResourceNode, VendorQuota } from '../../api/types';
 
-const modelRuntimeMock = [
-  { time: '09:00', model: 220, customer: 180, selfHosted: 260, thirdParty: 140 },
-  { time: '11:00', model: 380, customer: 260, selfHosted: 430, thirdParty: 210 },
-  { time: '13:00', model: 330, customer: 420, selfHosted: 470, thirdParty: 280 },
-  { time: '15:00', model: 520, customer: 390, selfHosted: 590, thirdParty: 320 },
-  { time: '17:00', model: 610, customer: 470, selfHosted: 690, thirdParty: 390 },
-];
-
-const routeShare = [
-  { name: '自建路由', value: 64 },
-  { name: '三方路由', value: 36 },
-];
-
-const vendorShare = [
-  { name: '火山', value: 38 },
-  { name: '百舸', value: 31 },
-  { name: '千帆', value: 21 },
-  { name: '其他', value: 10 },
-];
-
-const palette = ['#27d7ff', '#5dffb2', '#ffb347', '#9b8cff', '#ff5f6d'];
-
-function sum<T>(items: T[], pick: (item: T) => number | null | undefined) {
-  return items.reduce((total, item) => total + Number(pick(item) || 0), 0);
+interface MetricItem {
+  label: string;
+  value: string;
 }
 
-interface ClusterCapacityRow {
+interface SelfHostedClusterRow {
+  id: string;
   clusterName: string;
-  model: string;
-  customers: string;
+  deployedModel: string;
+  provider: string;
   machineCount: number;
-  singleMachineTpm: number;
+  tpmPerMachine: number;
   totalCapacity: number;
-  currentTpm: number;
-  utilization: number;
+  runtimeTpm: number;
+  clusterUtilization: number;
+  redundantTpm: number;
   redundantMachines: number;
 }
 
-function buildClusterRows(nodes: ResourceNode[], demands: Demand[]): ClusterCapacityRow[] {
-  const customerByModel = demands.reduce<Record<string, Set<string>>>((map, demand) => {
-    const key = demand.model_name || '未知模型';
-    if (!map[key]) map[key] = new Set<string>();
-    if (demand.customer_id) map[key].add(`客户 ${demand.customer_id}`);
-    return map;
-  }, {});
+interface VendorRuntimeRow {
+  id: string;
+  vendorName: string;
+  modelName: string;
+  quotaW: number;
+  purchaseDiscount: string;
+  onlineRuntime: number;
+  redundantRuntime: number;
+}
 
-  return nodes.map((node) => {
-    const machineCount = Number(node.machine_count || node.machine_num || node.gpu_count || node.device_count || 1);
-    const totalCapacity = Number(node.capacity_tpm || 0);
-    const availableTpm = Number(node.available_tpm || 0);
-    const currentTpm = Math.max(totalCapacity - availableTpm, 0);
-    const singleMachineTpm = machineCount > 0 ? Math.floor(totalCapacity / machineCount) : totalCapacity;
-    const utilization = totalCapacity > 0 ? currentTpm / totalCapacity : Number(node.utilization || 0);
-    const customers = Array.from(customerByModel[node.gpu_model] || []).slice(0, 3).join('、') || '通用客户';
+interface DemandAcceptanceRow {
+  id: number;
+  demandNo: string;
+  customerId: number;
+  modelName: string;
+  expectedTpm: number;
+  status: string;
+}
 
-    return {
-      clusterName: String(node.cluster_name || node.cluster || node.node_id),
-      model: node.gpu_model,
-      customers,
-      machineCount,
-      singleMachineTpm,
-      totalCapacity,
-      currentTpm,
-      utilization,
-      redundantMachines: singleMachineTpm > 0 ? Math.floor(availableTpm / singleMachineTpm) : 0,
-    };
+interface ChartLine {
+  key: string;
+  name: string;
+  color: string;
+}
+
+interface ChartSummaryRow {
+  label: string;
+  color: string;
+  max: string;
+  mean: string;
+  last: string;
+}
+
+interface RuntimeLineChartProps {
+  title: string;
+  data: Array<Record<string, number | string>>;
+  lines: ChartLine[];
+  summary: ChartSummaryRow[];
+  yDomain: [number, number];
+  yTicks: number[];
+  yFormatter: (value: number) => string;
+}
+
+const baseSelfHostedRows: SelfHostedClusterRow[] = [
+  { id: 'DeepSeek-V3.2', clusterName: 'DeepSeek-V3.2', deployedModel: 'DeepSeek-V3.2', provider: 'ksyun-dsv32-qy-10017', machineCount: 9, tpmPerMachine: 260, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'GLM-5.1-FP8', clusterName: 'GLM-5.1-FP8', deployedModel: 'GLM-5.1', provider: 'ksyun-glm5.1-qy-10056', machineCount: 6, tpmPerMachine: 260, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'GLM-5.1-KSCC', clusterName: 'GLM-5.1-KSCC', deployedModel: 'GLM-5.1', provider: 'ksyun-glm5.1-qy-10070', machineCount: 3, tpmPerMachine: 700, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'GLM-5.1-XISHANJU', clusterName: 'GLM-5.1-XISHANJU', deployedModel: 'GLM-5.1', provider: 'ksyun-glm5.1-qy-10068', machineCount: 2, tpmPerMachine: 200, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'GLM-5.2', clusterName: 'GLM-5.2', deployedModel: 'GLM-5.2', provider: 'ksyun-glm5.2-qy-10070', machineCount: 20, tpmPerMachine: 200, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'GLM-5.2-Tencent', clusterName: 'GLM-5.2-Tencent', deployedModel: 'GLM-5.2', provider: 'ksyun-glm5.2-qy-10071', machineCount: 24, tpmPerMachine: 250, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'jl-test', clusterName: 'jl-test', deployedModel: '测试机', provider: '', machineCount: 1, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'Kimi-K2.5-NVFP4-MIHAYOU', clusterName: 'Kimi-K2.5-NVFP4-MIHAYOU', deployedModel: 'Kimi-k2.5', provider: 'ksyun-kimi-k25-qy-10065', machineCount: 8, tpmPerMachine: 250, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'KSCC-TEST', clusterName: 'KSCC-TEST', deployedModel: '测试机', provider: '', machineCount: 2, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'llc-test1', clusterName: 'llc-test1', deployedModel: '测试机', provider: '', machineCount: 1, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'wd-test', clusterName: 'wd-test', deployedModel: '测试机', provider: '', machineCount: 2, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+  { id: 'weilai-test', clusterName: 'weilai-test', deployedModel: '测试机', provider: '', machineCount: 1, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
+];
+
+function normalizeClusterRow(row: SelfHostedClusterRow): SelfHostedClusterRow {
+  const totalCapacity = row.machineCount * row.tpmPerMachine;
+  const redundantTpm = Math.max(totalCapacity - row.runtimeTpm, 0);
+  return {
+    ...row,
+    totalCapacity,
+    redundantTpm,
+    clusterUtilization: totalCapacity > 0 ? row.runtimeTpm / totalCapacity : 0,
+    redundantMachines: row.tpmPerMachine > 0 ? Math.floor(redundantTpm / row.tpmPerMachine) : 0,
+  };
+}
+
+function buildClusterRows(rows: SelfHostedClusterRow[]) {
+  const computedRows = rows.map(normalizeClusterRow);
+  const totalRow = normalizeClusterRow({
+    id: 'total',
+    clusterName: 'Total',
+    deployedModel: '',
+    provider: '',
+    machineCount: computedRows.reduce((total, row) => total + row.machineCount, 0),
+    tpmPerMachine: 0,
+    totalCapacity: 0,
+    runtimeTpm: computedRows.reduce((total, row) => total + row.runtimeTpm, 0),
+    clusterUtilization: 0,
+    redundantTpm: 0,
+    redundantMachines: computedRows.reduce((total, row) => total + row.redundantMachines, 0),
   });
+  totalRow.totalCapacity = computedRows.reduce((total, row) => total + row.totalCapacity, 0);
+  totalRow.redundantTpm = computedRows.reduce((total, row) => total + row.redundantTpm, 0);
+  totalRow.clusterUtilization = totalRow.totalCapacity > 0 ? totalRow.runtimeTpm / totalRow.totalCapacity : 0;
+  return [...computedRows, totalRow];
+}
+
+function buildSelfHostedMetrics(rows: SelfHostedClusterRow[]): MetricItem[] {
+  const computedRows = rows.map(normalizeClusterRow);
+  const machineCount = computedRows.reduce((total, row) => total + row.machineCount, 0);
+  const totalCapacity = computedRows.reduce((total, row) => total + row.totalCapacity, 0);
+  const runtimeTpm = computedRows.reduce((total, row) => total + row.runtimeTpm, 0);
+  const redundantTpm = computedRows.reduce((total, row) => total + row.redundantTpm, 0);
+  return [
+    { label: '机器台数', value: numberText(machineCount) },
+    { label: '总承接能力', value: numberText(totalCapacity) },
+    { label: '当前冗余TPM', value: numberText(redundantTpm) },
+    { label: '当前利用率', value: percent(totalCapacity > 0 ? runtimeTpm / totalCapacity : 0) },
+  ];
+}
+
+const vendorMetrics: MetricItem[] = [
+  { label: '供应商总量', value: '1' },
+  { label: '已分配配额 TPM', value: numberText(1000) },
+  { label: '线上实跑量', value: numberText(200) },
+  { label: '冗余量', value: numberText(2800) },
+];
+
+const vendorRows: VendorRuntimeRow[] = [
+  { id: 'baidu-glm51', vendorName: '百度', modelName: 'GLM-5.1', quotaW: 3000, purchaseDiscount: '70%', onlineRuntime: 200, redundantRuntime: 2800 },
+];
+
+const demandRows: DemandAcceptanceRow[] = [
+  { id: 101, demandNo: 'DR-20260628-001', customerId: 88001, modelName: 'ERNIE-4.5-Turbo', expectedTpm: 420000, status: 'awaiting_approval' },
+  { id: 102, demandNo: 'DR-20260628-002', customerId: 88018, modelName: 'ERNIE-Speed-128K', expectedTpm: 260000, status: 'evaluating' },
+  { id: 103, demandNo: 'DR-20260627-009', customerId: 88032, modelName: 'Embedding-V2', expectedTpm: 180000, status: 'approved' },
+  { id: 104, demandNo: 'DR-20260626-004', customerId: 88045, modelName: 'ERNIE-Lite', expectedTpm: 90000, status: 'pending' },
+  { id: 105, demandNo: 'DR-20260625-012', customerId: 88001, modelName: 'ERNIE-4.5-Turbo', expectedTpm: 520000, status: 'live' },
+];
+
+const modelTpmData = [
+  { time: '22:08', glm52: 520000, glm51: 12000 },
+  { time: '22:11', glm52: 4000000, glm51: 42000 },
+  { time: '22:15', glm52: 900000, glm51: 18000 },
+  { time: '22:20', glm52: 430000, glm51: 11000 },
+  { time: '22:28', glm52: 360000, glm51: 8000 },
+  { time: '22:35', glm52: 620000, glm51: 6000 },
+  { time: '22:42', glm52: 260000, glm51: 3000 },
+  { time: '22:47', glm52: 680000, glm51: 1000 },
+  { time: '22:52', glm52: 360000, glm51: 0 },
+  { time: '22:57', glm52: 640000, glm51: 0 },
+  { time: '23:05', glm52: 401000, glm51: 0 },
+];
+
+const shareData = [
+  { time: '22:08', glm51Self: 100, glm52Self: 100 },
+  { time: '22:11', glm51Self: 100, glm52Self: 100 },
+  { time: '22:20', glm51Self: 100, glm52Self: 100 },
+  { time: '22:35', glm51Self: 100, glm52Self: 100 },
+  { time: '22:50', glm51Self: 100, glm52Self: 100 },
+  { time: '23:05', glm51Self: 100, glm52Self: 100 },
+];
+
+const modelLines: ChartLine[] = [
+  { key: 'glm52', name: 'glm-5.2', color: '#f5d54b' },
+  { key: 'glm51', name: 'glm-5.1', color: '#5dffb2' },
+];
+
+const shareLines: ChartLine[] = [
+  { key: 'glm51Self', name: 'glm-5.1 自建', color: '#5dffb2' },
+  { key: 'glm52Self', name: 'glm-5.2 自建', color: '#f5d54b' },
+];
+
+const demandMetrics: MetricItem[] = [
+  { label: '待承接需求', value: numberText(demandRows.filter((item) => ['pending', 'reported', 'evaluating'].includes(item.status)).length) },
+  { label: '需求 TPM', value: numberText(demandRows.reduce((total, item) => total + item.expectedTpm, 0)) },
+  { label: '自建当前可供 TPM', value: numberText(14880) },
+  { label: '三方需求持 TPM', value: numberText(2800) },
+];
+
+function formatTpm(value: number) {
+  if (value >= 1000000) return `${Number((value / 1000000).toFixed(1))} Mil`;
+  if (value >= 1000) return `${Number((value / 1000).toFixed(0))} K`;
+  return String(value);
+}
+
+function formatPercentAxis(value: number) {
+  return `${value.toFixed(2)}%`;
+}
+
+function MetricStrip({ items }: { items: MetricItem[] }) {
+  return (
+    <div className="realtime-metric-strip">
+      {items.map((item) => (
+        <div className="realtime-metric" key={item.label}>
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yFormatter }: RuntimeLineChartProps) {
+  return (
+    <div className="realtime-chart-card">
+      <div className="realtime-chart-title">{title}</div>
+      <div className="realtime-chart-canvas">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 8, right: 10, bottom: 0, left: -2 }}>
+            <CartesianGrid stroke="rgba(82, 191, 255, .12)" strokeDasharray="3 3" />
+            <XAxis dataKey="time" axisLine={false} tickLine={false} minTickGap={12} tick={{ fill: '#7898a7', fontSize: 11 }} />
+            <YAxis width={44} domain={yDomain} ticks={yTicks} tickFormatter={(value) => yFormatter(Number(value))} axisLine={false} tickLine={false} tick={{ fill: '#7898a7', fontSize: 11 }} />
+            <Tooltip contentStyle={{ background: '#071018', border: '1px solid rgba(82, 191, 255, .28)', borderRadius: 8 }} labelStyle={{ color: '#e6f7ff' }} />
+            {lines.map((line) => (
+              <Line key={line.key} type="monotone" dataKey={line.key} name={line.name} stroke={line.color} strokeWidth={2} dot={false} isAnimationActive={false} />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="realtime-chart-summary">
+        <span />
+        <strong>Max</strong>
+        <strong>Mean</strong>
+        <strong>Last*</strong>
+        {summary.map((item) => (
+          <div className="realtime-summary-row" key={item.label}>
+            <span className="realtime-legend-label"><i style={{ backgroundColor: item.color }} />{item.label}</span>
+            <span>{item.max}</span>
+            <span>{item.mean}</span>
+            <span>{item.last}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function RealtimeDashboard() {
-  const [resourceQuery, setResourceQuery] = useState<{ gpu_model?: string; datacenter?: string }>({});
-  const [vendorQuery, setVendorQuery] = useState({ page: 1, page_size: 20 });
-  const resources = useAsync(() => dashboardsApi.resources(resourceQuery), [resourceQuery.gpu_model, resourceQuery.datacenter]);
-  const vendors = useAsync(() => vendorsApi.quotas(vendorQuery), [JSON.stringify(vendorQuery)]);
-  const demands = useAsync(() => demandsApi.list({ page: 1, page_size: 50 }), []);
-  const error = resources.error || vendors.error || demands.error;
+  const navigate = useNavigate();
+  const [selfHostedRows, setSelfHostedRows] = useState<SelfHostedClusterRow[]>(() => baseSelfHostedRows.map(normalizeClusterRow));
+  const [savingClusterId, setSavingClusterId] = useState<string | null>(null);
+  const selfHostedTableRows = useMemo(() => buildClusterRows(selfHostedRows), [selfHostedRows]);
+  const selfHostedMetrics = useMemo(() => buildSelfHostedMetrics(selfHostedRows), [selfHostedRows]);
 
-  const nodes = resources.data?.nodes || [];
-  const vendorItems = vendors.data?.items || [];
-  const demandItems = demands.data?.items || [];
-  const totalCapacity = resources.data?.total_capacity_tpm ?? sum(nodes, (item) => item.capacity_tpm);
-  const totalAvailable = resources.data?.total_available_tpm ?? sum(nodes, (item) => item.available_tpm);
-  const vendorQuota = sum(vendorItems, (item) => item.quota_tpm);
-  const onlineRuntime = 12600;
-  const pendingDemands = demandItems.filter((item) => ['pending', 'reported', 'evaluating'].includes(item.status)).length;
-  const demandTpm = sum(demandItems, (item) => item.expected_tpm);
-  const thirdPartyHoldTpm = Math.max(vendorQuota - onlineRuntime, 0);
-  const clusterRows = useMemo(() => buildClusterRows(nodes, demandItems), [nodes, demandItems]);
+  useEffect(() => {
+    let cancelled = false;
+    dashboardsApi.resources({}).then((data) => {
+      if (cancelled || !data.clusters?.length) return;
+      setSelfHostedRows((rows) => rows.map((row) => {
+        const cluster = data.clusters?.find((item) => item.cluster_name === row.clusterName && item.deployed_model === row.deployedModel);
+        if (!cluster) return row;
+        return normalizeClusterRow({
+          ...row,
+          provider: cluster.provider || row.provider,
+          machineCount: Number(cluster.machine_count ?? row.machineCount),
+          tpmPerMachine: Number(cluster.tpm_per_machine_w ?? row.tpmPerMachine),
+          runtimeTpm: Number(cluster.current_tpm_w ?? row.runtimeTpm),
+        });
+      }));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
-  const modelRuntime = useMemo(() => modelRuntimeMock, []);
+  const saveTpmPerMachine = async (record: SelfHostedClusterRow, value: number | null) => {
+    const nextValue = Number(value || 0);
+    if (nextValue === record.tpmPerMachine) return;
+    const nextRow = normalizeClusterRow({ ...record, tpmPerMachine: nextValue });
+    setSavingClusterId(record.id);
+    try {
+      await dashboardsApi.updateClusterResource({
+        cluster_name: record.clusterName,
+        deployed_model: record.deployedModel,
+        provider: record.provider,
+        machine_count: record.machineCount,
+        tpm_per_machine_w: nextValue,
+        current_tpm_w: record.runtimeTpm,
+      });
+      setSelfHostedRows((rows) => rows.map((row) => (row.id === record.id ? nextRow : row)));
+      message.success('单机承载能力已保存');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '单机承载能力保存失败');
+    } finally {
+      setSavingClusterId(null);
+    }
+  };
 
   return (
     <>
       <PageHeader eyebrow="Realtime" title="实时看板" description="展示当前自建资源、三方供应商、模型与客户维度实跑，以及新需求承接能力。" />
-      {error ? <ErrorState error={error} onRetry={() => { resources.reload(); vendors.reload(); demands.reload(); }} /> : null}
-      <div className="wire-grid page-section">
-        <section className="wire-card dashboard-panel-wide">
+      <div className="realtime-board page-section">
+        <section className="wire-card realtime-panel realtime-cluster-panel">
           <div className="wire-card-title">自建集群信息</div>
-          <div className="metric-strip">
-            <div><span>机器台数</span><strong>{numberText(nodes.length)}</strong></div>
-            <div><span>总容量 TPM</span><strong>{numberText(totalCapacity)}</strong></div>
-            <div><span>可供 TPM</span><strong>{numberText(totalAvailable)}</strong></div>
-            <div><span>实时利用率</span><strong>{percent(resources.data?.avg_utilization)}</strong></div>
-          </div>
-          <Form layout="inline" className="filter-bar compact-filter" onFinish={setResourceQuery}>
-            <Form.Item name="gpu_model" label="模型"><Input allowClear /></Form.Item>
-            <Form.Item name="datacenter" label="机房"><Input allowClear /></Form.Item>
-            <Button htmlType="submit" type="primary">筛选</Button>
-          </Form>
-          <Spin spinning={resources.loading}>
-            <Table<ClusterCapacityRow>
-              rowKey="clusterName"
-              size="small"
-              dataSource={clusterRows}
-              pagination={{ pageSize: 5 }}
-              scroll={{ x: 'max-content' }}
-              columns={[
-                { title: '集群名称', dataIndex: 'clusterName' },
-                { title: '部署模型', dataIndex: 'model' },
-                { title: '主要支持客户', dataIndex: 'customers' },
-                { title: '机器数量', dataIndex: 'machineCount', render: numberText },
-                { title: '单台承接 TPM', dataIndex: 'singleMachineTpm', render: numberText },
-                { title: '总承接能力', dataIndex: 'totalCapacity', render: numberText },
-                { title: '当前 TPM', dataIndex: 'currentTpm', render: numberText },
-                { title: '当前利用率', dataIndex: 'utilization', render: (value) => <Progress percent={Number((Number(value || 0) * 100).toFixed(1))} size="small" strokeColor="#27d7ff" /> },
-                { title: '当前冗余台数', dataIndex: 'redundantMachines', render: numberText },
-              ]}
-            />
-          </Spin>
+          <MetricStrip items={selfHostedMetrics} />
+          <Table<SelfHostedClusterRow>
+            rowKey="id"
+            size="small"
+            dataSource={selfHostedTableRows}
+            pagination={false}
+            scroll={{ x: 1180 }}
+            rowClassName={(record) => (record.id === 'total' ? 'realtime-total-row' : '')}
+            columns={[
+              { title: '集群名称', dataIndex: 'clusterName', width: 190 },
+              { title: '主要部署模型', dataIndex: 'deployedModel', width: 150 },
+              { title: 'provider', dataIndex: 'provider', width: 190 },
+              { title: '机器台数', dataIndex: 'machineCount', width: 90, align: 'right', render: numberText },
+              {
+                title: '单机承载能力',
+                dataIndex: 'tpmPerMachine',
+                width: 130,
+                align: 'right',
+                render: (value, record) => record.id === 'total' ? '' : (
+                  <InputNumber
+                    key={`${record.id}-${value}`}
+                    className="realtime-cell-number"
+                    min={0}
+                    size="small"
+                    defaultValue={Number(value || 0)}
+                    disabled={savingClusterId === record.id}
+                    onPressEnter={(event) => event.currentTarget.blur()}
+                    onBlur={(event) => saveTpmPerMachine(record, Number(event.currentTarget.value))}
+                  />
+                ),
+              },
+              { title: '总承载能力', dataIndex: 'totalCapacity', width: 110, align: 'right', render: numberText },
+              { title: '实跑TPM', dataIndex: 'runtimeTpm', width: 100, align: 'right', render: numberText },
+              { title: '集群利用率', dataIndex: 'clusterUtilization', width: 100, align: 'right', render: percent },
+              { title: '冗余TPM', dataIndex: 'redundantTpm', width: 100, align: 'right', render: numberText },
+              { title: '冗余机器台数', dataIndex: 'redundantMachines', width: 120, align: 'right', render: numberText },
+            ]}
+          />
         </section>
 
-        <section className="wire-card dashboard-panel-wide">
+        <section className="wire-card realtime-panel realtime-vendor-panel">
           <div className="wire-card-title">三方供应商信息</div>
-          <div className="metric-strip">
-            <div><span>供应商总量</span><strong>{numberText(vendors.data?.total || 0)}</strong></div>
-            <div><span>已分配配额 TPM</span><strong>{numberText(vendorQuota)}</strong></div>
-            <div><span>线上实跑量</span><strong>{numberText(onlineRuntime)}</strong></div>
-            <div><span>冗余量</span><strong>{numberText(thirdPartyHoldTpm)}</strong></div>
-          </div>
-          <Spin spinning={vendors.loading}>
-            <Table<VendorQuota>
-              rowKey="id"
-              size="small"
-              dataSource={vendorItems}
-              expandable={{ expandedRowRender: (record) => <JsonBlock value={record} /> }}
-              pagination={{ current: vendors.data?.page || 1, pageSize: vendors.data?.page_size || 20, total: vendors.data?.total || 0, onChange: (page, pageSize) => setVendorQuery({ page, page_size: pageSize }) }}
-              scroll={{ x: 'max-content' }}
-              columns={[
-                { title: '供应商', dataIndex: 'vendor' },
-                { title: '模型', dataIndex: 'model' },
-                { title: '配额 TPM', dataIndex: 'quota_tpm', render: numberText },
-                { title: '采购折扣', dataIndex: 'unit_cost' },
-                { title: '状态', dataIndex: 'status' },
-              ]}
-            />
-          </Spin>
+          <MetricStrip items={vendorMetrics} />
+          <Table<VendorRuntimeRow>
+            rowKey="id"
+            size="small"
+            dataSource={vendorRows}
+            pagination={false}
+            scroll={{ x: 760 }}
+            expandable={{ expandedRowRender: (record) => <div className="realtime-expand-note">当前冗余量：{numberText(record.redundantRuntime)}w TPM</div> }}
+            columns={[
+              { title: '供应商名称', dataIndex: 'vendorName', width: 120 },
+              { title: '模型名称', dataIndex: 'modelName', width: 120 },
+              { title: '配额（w）', dataIndex: 'quotaW', width: 110, render: numberText },
+              { title: '采购折扣', dataIndex: 'purchaseDiscount', width: 100 },
+              { title: '线上实际能量', dataIndex: 'onlineRuntime', width: 120, render: numberText },
+              { title: '已冗余量', dataIndex: 'redundantRuntime', width: 100, render: numberText },
+            ]}
+          />
         </section>
 
-        <section className="wire-card dashboard-panel-wide">
+        <section className="wire-card realtime-panel realtime-runtime-panel">
           <div className="wire-card-title">模型/客户维度实跑图</div>
-          <Form layout="inline" className="filter-bar compact-filter">
-            <Form.Item label="时间范围"><Select defaultValue="today" style={{ width: 120 }} options={[{ label: '今日', value: 'today' }, { label: '近 7 天', value: '7d' }]} /></Form.Item>
-            <Form.Item label="模型"><Input placeholder="全部" /></Form.Item>
-            <Form.Item label="客户"><Input placeholder="全部" /></Form.Item>
+          <Form layout="inline" className="realtime-filter-grid">
+            <Form.Item label="时间范围"><Select defaultValue="today" options={[{ label: '今日', value: 'today' }, { label: '近 7 天', value: '7d' }]} /></Form.Item>
+            <Form.Item label="模型"><Input defaultValue="全部" /></Form.Item>
+            <Form.Item label="客户"><Input defaultValue="全部" /></Form.Item>
+            <Form.Item label="用户ID"><Input defaultValue="全部" /></Form.Item>
           </Form>
-          {modelRuntime.length ? (
-            <div className="split-panel runtime-panel">
-              <div className="resource-chart">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={modelRuntime}>
-                    <XAxis dataKey="time" />
-                    <YAxis />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="model" name="模型实跑" stroke="#5dffb2" />
-                    <Line type="monotone" dataKey="customer" name="客户实跑" stroke="#9b8cff" />
-                    <Line type="monotone" dataKey="selfHosted" name="自建分发" stroke="#27d7ff" />
-                    <Line type="monotone" dataKey="thirdParty" name="三方分发" stroke="#ffb347" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="share-column">
-                <ResponsiveContainer width="100%" height={150}><PieChart><Pie data={routeShare} dataKey="value" nameKey="name" innerRadius={36} outerRadius={58}>{routeShare.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer>
-                <ResponsiveContainer width="100%" height={150}><PieChart><Pie data={vendorShare} dataKey="value" nameKey="name" innerRadius={34} outerRadius={56}>{vendorShare.map((_, index) => <Cell key={index} fill={palette[(index + 2) % palette.length]} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer>
-              </div>
-            </div>
-          ) : <EmptyState />}
-        </section>
-
-        <section className="wire-card">
-          <div className="wire-card-title">新需求承接信息</div>
-          <Spin spinning={demands.loading}>
-            <div className="acceptance-grid">
-              <div><span>待承接需求</span><strong>{numberText(pendingDemands)}</strong></div>
-              <div><span>需求 TPM</span><strong>{numberText(demandTpm)}</strong></div>
-              <div><span>自建当前可供 TPM</span><strong>{numberText(totalAvailable)}</strong></div>
-              <div><span>三方需求持 TPM</span><strong>{numberText(thirdPartyHoldTpm)}</strong></div>
-            </div>
-            <Table<Demand>
-              rowKey="id"
-              size="small"
-              dataSource={demandItems.slice(0, 6)}
-              pagination={false}
-              scroll={{ x: 'max-content' }}
-              columns={[
-                { title: '需求', dataIndex: 'report_id' },
-                { title: '客户', dataIndex: 'customer_id' },
-                { title: '模型', dataIndex: 'model_name' },
-                { title: '需求 TPM', dataIndex: 'expected_tpm', render: numberText },
-                { title: '状态', dataIndex: 'status' },
+          <div className="realtime-chart-stack">
+            <RuntimeLineChart
+              title="售卖模型TPM(BODHIMIND SDN.BHD.)"
+              data={modelTpmData}
+              lines={modelLines}
+              yDomain={[0, 4200000]}
+              yTicks={[0, 1000000, 2000000, 4000000]}
+              yFormatter={formatTpm}
+              summary={[
+                { label: 'glm-5.2', color: '#f5d54b', max: '4 Mil', mean: '801 K', last: '401 K' },
+                { label: 'glm-5.1', color: '#5dffb2', max: '42 K', mean: '6 K', last: '0' },
               ]}
             />
-          </Spin>
+            <RuntimeLineChart
+              title="售卖模型分发后端TPM占比(自建第三方维度，BODHIMIND SDN.BHD.)"
+              data={shareData}
+              lines={shareLines}
+              yDomain={[0, 200]}
+              yTicks={[0, 50, 100, 150, 200]}
+              yFormatter={formatPercentAxis}
+              summary={[
+                { label: 'glm-5.1 自建', color: '#5dffb2', max: '100.00%', mean: '100.00%', last: '100.00%' },
+                { label: 'glm-5.2 自建', color: '#f5d54b', max: '100.00%', mean: '100.00%', last: '100.00%' },
+              ]}
+            />
+            <RuntimeLineChart
+              title="售卖模型分发后端TPM占比(模型维度，BODHIMIND SDN.BHD.)"
+              data={shareData}
+              lines={shareLines}
+              yDomain={[0, 200]}
+              yTicks={[0, 50, 100, 150, 200]}
+              yFormatter={formatPercentAxis}
+              summary={[
+                { label: 'glm-5.1 自建', color: '#5dffb2', max: '100.00%', mean: '100.00%', last: '100.00%' },
+                { label: 'glm-5.2 自建', color: '#f5d54b', max: '100.00%', mean: '100.00%', last: '100.00%' },
+              ]}
+            />
+          </div>
+        </section>
+
+        <section className="wire-card realtime-panel realtime-demand-panel">
+          <div className="realtime-title-row">
+            <div className="wire-card-title">新需求承接信息</div>
+            <Button type="primary" size="small" onClick={() => navigate('/demands')}>录入需求</Button>
+          </div>
+          <MetricStrip items={demandMetrics} />
+          <Table<DemandAcceptanceRow>
+            rowKey="id"
+            size="small"
+            dataSource={demandRows}
+            pagination={false}
+            scroll={{ x: 620 }}
+            columns={[
+              { title: '需求', dataIndex: 'demandNo', width: 150 },
+              { title: '客户', dataIndex: 'customerId', width: 86 },
+              {
+                title: '操作',
+                key: 'actions',
+                width: 260,
+                render: (_, record) => (
+                  <div className="realtime-action-group">
+                    <Button size="small" onClick={() => navigate(`/demands/${record.id}`)}>查看</Button>
+                    <Button size="small" onClick={() => navigate(`/demands/${record.id}`)}>发起评估</Button>
+                    <Button size="small" onClick={() => navigate('/demands')}>状态流转</Button>
+                  </div>
+                ),
+              },
+            ]}
+          />
         </section>
       </div>
     </>

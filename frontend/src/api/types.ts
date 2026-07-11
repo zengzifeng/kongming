@@ -205,12 +205,32 @@ export interface ResourceNode {
   [key: string]: unknown;
 }
 
+export interface ResourceCluster {
+  cluster_name: string;
+  deployed_model: string;
+  primary_customer: string | null;
+  provider?: string;
+  machine_count: number;
+  tpm_per_machine: number;
+  tpm_per_machine_w?: number;
+  total_capacity_tpm: number;
+  total_capacity_w?: number;
+  current_tpm: number;
+  current_tpm_w?: number;
+  current_redundant_tpm: number;
+  current_redundant_w?: number;
+  current_redundant_machines?: number;
+  cluster_utilization?: number;
+  [key: string]: unknown;
+}
+
 export interface ResourceDashboard {
   captured_at: string | null;
   total_capacity_tpm: number;
   total_available_tpm: number;
   avg_utilization: number;
   nodes: ResourceNode[];
+  clusters?: ResourceCluster[];
 }
 
 export type QueryParams = Record<string, string | number | boolean | null | undefined>;

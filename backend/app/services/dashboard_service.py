@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select
 
 from ..extensions import db
 from ..models import (
     Alert,
+    ClusterResource,
     Customer,
     CustomerUsageDaily,
     Demand,
@@ -18,6 +20,7 @@ from ..models import (
     RevenueAttribution,
 )
 from ..models.alert import AlertStatus
+from ..utils.errors import NotFound, ValidationFailed
 from ..utils.time import utcnow
 
 
@@ -237,25 +240,7 @@ class DashboardService:
             total_current / total_capacity) if total_capacity else 0
 
         clusters_payload = [
-            {
-                "cluster_name": c.cluster_name,
-                "deployed_model": c.deployed_model,
-                "primary_customer": c.primary_customer,
-                "machine_count": c.machine_count,
-                "tpm_per_machine": c.tpm_per_machine,
-                "total_capacity_tpm": c.total_capacity_tpm,
-                "peak_tpm_d1_23_24": c.peak_tpm_d1_23_24,
-                "peak_tpm_d2_23_24": c.peak_tpm_d2_23_24,
-                "peak_tpm_d3_23_24": c.peak_tpm_d3_23_24,
-                "peak_tpm_idle": c.peak_tpm_idle,
-                "idle_redundant_tpm": c.idle_redundant_tpm,
-                "idle_redundant_machines": c.idle_redundant_machines,
-                "peak_tpm_busy": c.peak_tpm_busy,
-                "busy_redundant_tpm": c.busy_redundant_tpm,
-                "busy_redundant_machines": c.busy_redundant_machines,
-                "current_tpm": c.current_tpm,
-                "current_redundant_tpm": c.current_redundant_tpm,
-            }
+            self._cluster_payload(c)
             for c in clusters
         ]
         nodes = [
@@ -285,3 +270,107 @@ class DashboardService:
             "total_busy_redundant_tpm": total_busy_redundant,
             "clusters": clusters_payload,
         }
+
+    def update_cluster_tpm_per_machine(
+        self,
+        cluster_name: str,
+        deployed_model: str,
+        tpm_per_machine_w: float,
+        machine_count: int | None = None,
+        current_tpm_w: float | None = None,
+        provider: str | None = None,
+    ) -> dict:
+        if not cluster_name or not deployed_model:
+            raise ValidationFailed("集群名称和主要部署模型不能为空")
+        if tpm_per_machine_w < 0:
+            raise ValidationFailed("单机承载能力不能小于 0")
+        if machine_count is not None and machine_count < 0:
+            raise ValidationFailed("机器台数不能小于 0")
+
+        latest = db.session.execute(
+            select(func.max(ClusterResource.snapshot_date))
+        ).scalar() or utcnow().date()
+
+        row = db.session.execute(
+            select(ClusterResource).where(
+                ClusterResource.snapshot_date == latest,
+                ClusterResource.cluster_name == cluster_name,
+                ClusterResource.deployed_model == deployed_model,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = ClusterResource(
+                snapshot_date=latest,
+                cluster_name=cluster_name,
+                deployed_model=deployed_model,
+                machine_count=machine_count or 0,
+                raw_json={},
+            )
+            db.session.add(row)
+
+        tpm_per_machine = Decimal(str(tpm_per_machine_w)) * Decimal("10000")
+        machine_count_value = int(machine_count if machine_count is not None else row.machine_count or 0)
+        current_tpm = Decimal(str(current_tpm_w if current_tpm_w is not None else self._to_wtpm(row.current_tpm))) * Decimal("10000")
+        total_capacity = Decimal(machine_count_value) * tpm_per_machine
+        redundant_tpm = max(total_capacity - current_tpm, Decimal("0"))
+        redundant_machines = int(redundant_tpm // tpm_per_machine) if tpm_per_machine > 0 else 0
+
+        raw_json = dict(row.raw_json or {})
+        if provider:
+            raw_json["provider"] = provider
+        raw_json.update({
+            "单台承接能力_wTPM": tpm_per_machine_w,
+            "总承接能力_wTPM": float(total_capacity / Decimal("10000")),
+        })
+
+        row.machine_count = machine_count_value
+        row.tpm_per_machine = tpm_per_machine
+        row.total_capacity_tpm = total_capacity
+        row.current_tpm = current_tpm
+        row.current_redundant_tpm = redundant_tpm
+        row.current_redundant_machines = redundant_machines
+        row.raw_json = raw_json
+        db.session.flush()
+        return self._cluster_model_payload(row)
+
+    def _cluster_payload(self, c) -> dict:
+        raw_json = getattr(c, "raw_json", None) or {}
+        total_capacity = self._to_number(c.total_capacity_tpm)
+        current_tpm = self._to_number(c.current_tpm)
+        return {
+            "cluster_name": c.cluster_name,
+            "deployed_model": c.deployed_model,
+            "primary_customer": c.primary_customer,
+            "provider": raw_json.get("provider") or c.cluster_name,
+            "machine_count": int(c.machine_count or 0),
+            "tpm_per_machine": self._to_number(c.tpm_per_machine),
+            "tpm_per_machine_w": self._to_wtpm(c.tpm_per_machine),
+            "total_capacity_tpm": total_capacity,
+            "total_capacity_w": self._to_wtpm(c.total_capacity_tpm),
+            "peak_tpm_d1_23_24": self._to_number(c.peak_tpm_d1_23_24),
+            "peak_tpm_d2_23_24": self._to_number(c.peak_tpm_d2_23_24),
+            "peak_tpm_d3_23_24": self._to_number(c.peak_tpm_d3_23_24),
+            "peak_tpm_idle": self._to_number(c.peak_tpm_idle),
+            "idle_redundant_tpm": self._to_number(c.idle_redundant_tpm),
+            "idle_redundant_machines": int(c.idle_redundant_machines or 0),
+            "peak_tpm_busy": self._to_number(c.peak_tpm_busy),
+            "busy_redundant_tpm": self._to_number(c.busy_redundant_tpm),
+            "busy_redundant_machines": int(c.busy_redundant_machines or 0),
+            "current_tpm": current_tpm,
+            "current_tpm_w": self._to_wtpm(c.current_tpm),
+            "current_redundant_tpm": self._to_number(c.current_redundant_tpm),
+            "current_redundant_w": self._to_wtpm(c.current_redundant_tpm),
+            "current_redundant_machines": int(c.current_redundant_machines or 0),
+            "cluster_utilization": (current_tpm / total_capacity) if total_capacity else 0,
+        }
+
+    @staticmethod
+    def _to_number(value) -> float:
+        return float(value or 0)
+
+    def _cluster_model_payload(self, c: ClusterResource) -> dict:
+        return self._cluster_payload(c)
+
+    @staticmethod
+    def _to_wtpm(value) -> float:
+        return round(float(value or 0) / 10000, 4)

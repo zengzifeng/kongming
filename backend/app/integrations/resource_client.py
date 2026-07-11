@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -23,6 +24,7 @@ class ClusterResourceItem:
     current_tpm: float
     current_redundant_tpm: float
     current_redundant_machines: int = 0  # 可供出机器数（录入「冗余台数」），求解器 _donatable_machines 的正典键
+    raw_json: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -80,7 +82,9 @@ def _to_item(row) -> ClusterResourceItem:
     kwargs = {}
     for f in _ITEM_FIELDS:
         v = getattr(row, f, None)
-        if f == "primary_customer":
+        if f == "raw_json":
+            kwargs[f] = dict(v or {})
+        elif f == "primary_customer":
             kwargs[f] = v  # 可空字符串，原样保留
         elif f in _STR_FIELDS:
             kwargs[f] = str(v) if v is not None else ""

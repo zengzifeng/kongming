@@ -25,6 +25,10 @@ algo = [
     "pulp>=2.8",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["instance*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

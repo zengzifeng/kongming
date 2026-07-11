@@ -1,5 +1,5 @@
 import { Button, Descriptions, Drawer, Form, Input, message, Modal, Select, Space, Spin, Table } from 'antd';
-import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useMemo, useState } from 'react';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusTag } from '../../components/StatusTag';
@@ -11,13 +11,47 @@ import { useAsync } from '../../hooks/useAsync';
 import { dateText, money, numberText } from '../../utils/format';
 import { parseJsonObject } from '../../utils/json';
 
-const nightRuntime = [
-  { time: '00:00', clusterA: 210, clusterB: 180, clusterC: 160, fit: 220 },
-  { time: '02:00', clusterA: 180, clusterB: 150, clusterC: 130, fit: 190 },
-  { time: '04:00', clusterA: 170, clusterB: 140, clusterC: 120, fit: 175 },
-  { time: '06:00', clusterA: 260, clusterB: 220, clusterC: 190, fit: 245 },
-  { time: '08:00', clusterA: 340, clusterB: 280, clusterC: 250, fit: 320 },
+const clusterOptions = [
+  { label: 'ksyun-glm5.1-qy-10056', value: 'ksyun-glm5.1-qy-10056' },
+  { label: 'ksyun-glm5.1-qy-10057', value: 'ksyun-glm5.1-qy-10057' },
+  { label: 'ksyun-glm5.1-qy-10058', value: 'ksyun-glm5.1-qy-10058' },
 ];
+
+const idleRuntimeByCluster: Record<string, Array<{ time: string; dayBefore: number; yesterday: number; forecast: number }>> = {
+  'ksyun-glm5.1-qy-10056': [
+    { time: '00:00', dayBefore: 185000, yesterday: 205000, forecast: 198000 },
+    { time: '01:00', dayBefore: 130000, yesterday: 150000, forecast: 142000 },
+    { time: '02:00', dayBefore: 110000, yesterday: 128000, forecast: 118000 },
+    { time: '03:00', dayBefore: 100000, yesterday: 112000, forecast: 108000 },
+    { time: '04:00', dayBefore: 90000, yesterday: 98000, forecast: 94000 },
+    { time: '05:00', dayBefore: 130000, yesterday: 145000, forecast: 138000 },
+    { time: '06:00', dayBefore: 245000, yesterday: 270000, forecast: 258000 },
+    { time: '07:00', dayBefore: 345000, yesterday: 405000, forecast: 378000 },
+    { time: '08:00', dayBefore: 330000, yesterday: 382000, forecast: 360000 },
+  ],
+  'ksyun-glm5.1-qy-10057': [
+    { time: '00:00', dayBefore: 160000, yesterday: 172000, forecast: 168000 },
+    { time: '01:00', dayBefore: 118000, yesterday: 132000, forecast: 125000 },
+    { time: '02:00', dayBefore: 98000, yesterday: 112000, forecast: 105000 },
+    { time: '03:00', dayBefore: 84000, yesterday: 96000, forecast: 90000 },
+    { time: '04:00', dayBefore: 78000, yesterday: 86000, forecast: 83000 },
+    { time: '05:00', dayBefore: 116000, yesterday: 132000, forecast: 124000 },
+    { time: '06:00', dayBefore: 210000, yesterday: 238000, forecast: 224000 },
+    { time: '07:00', dayBefore: 310000, yesterday: 352000, forecast: 332000 },
+    { time: '08:00', dayBefore: 286000, yesterday: 325000, forecast: 306000 },
+  ],
+  'ksyun-glm5.1-qy-10058': [
+    { time: '00:00', dayBefore: 132000, yesterday: 146000, forecast: 140000 },
+    { time: '01:00', dayBefore: 102000, yesterday: 116000, forecast: 108000 },
+    { time: '02:00', dayBefore: 89000, yesterday: 98000, forecast: 94000 },
+    { time: '03:00', dayBefore: 76000, yesterday: 84000, forecast: 80000 },
+    { time: '04:00', dayBefore: 70000, yesterday: 78000, forecast: 74000 },
+    { time: '05:00', dayBefore: 100000, yesterday: 116000, forecast: 108000 },
+    { time: '06:00', dayBefore: 176000, yesterday: 205000, forecast: 190000 },
+    { time: '07:00', dayBefore: 264000, yesterday: 305000, forecast: 286000 },
+    { time: '08:00', dayBefore: 250000, yesterday: 290000, forecast: 272000 },
+  ],
+};
 
 const redundantMachines = [
   { cluster: 'Cluster-A', machines: 18 },
@@ -34,6 +68,14 @@ const clusterPlans = [
   { cluster: 'Cluster-C', customer: '客户 3072', move: '闲时训练队列承接新增需求', watermark: '68%', redundant: 11 },
 ];
 
+const benefitBars = [
+  { day: '06/01', baseGain: 8400, shiftGain: 5600, total: 14000, target: 13600 },
+  { day: '06/02', baseGain: 9500, shiftGain: 6700, total: 16200, target: 16000 },
+  { day: '06/03', baseGain: 11000, shiftGain: 7700, total: 18700, target: 18400 },
+  { day: '06/04', baseGain: 10400, shiftGain: 7500, total: 17900, target: 17600 },
+  { day: '06/05', baseGain: 12200, shiftGain: 6800, total: 19000, target: 19800 },
+];
+
 const revenueTrend = [
   { day: 'D-6', expected: 1100, actual: 980, gap: -120 },
   { day: 'D-5', expected: 1600, actual: 1520, gap: -80 },
@@ -44,8 +86,34 @@ const revenueTrend = [
   { day: '今日', expected: 4200, actual: 4050, gap: -150 },
 ];
 
+const axisTick = { fill: '#7898a8', fontSize: 12 };
+const tooltipStyle = {
+  backgroundColor: 'rgba(7, 16, 24, 0.96)',
+  border: '1px solid rgba(39, 215, 255, 0.28)',
+  borderRadius: 8,
+  color: '#e6f7ff',
+};
+
 function pickPolicies(policies: Policy[], key: string) {
   return policies.filter((item) => item.algorithm === key || JSON.stringify(item.summary_json || {}).includes(key));
+}
+
+function tpmTick(value: number | string) {
+  if (typeof value !== 'number') return value;
+  return value === 0 ? '0' : `${Math.round(value / 1000)}K`;
+}
+
+function revenueTick(value: number | string) {
+  if (typeof value !== 'number') return value;
+  return value === 0 ? '0k' : `${Math.round(value / 1000)}k`;
+}
+
+function numberTooltip(value: number | string) {
+  return typeof value === 'number' ? numberText(value) : value;
+}
+
+function moneyTooltip(value: number | string) {
+  return typeof value === 'number' ? money(value) : value;
 }
 
 export function IdleDashboard() {
@@ -54,9 +122,11 @@ export function IdleDashboard() {
   const [detail, setDetail] = useState<PolicyDetail | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [selectedCluster, setSelectedCluster] = useState(clusterOptions[0].value);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
   const idlePolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'off_peak'), [policies.data?.items]);
-  const totalGain = idlePolicies.reduce((sum, item) => sum + Number(item.expected_off_peak_gain || item.expected_revenue_gain || 0), 0);
+  const selectedRuntime = idleRuntimeByCluster[selectedCluster] || idleRuntimeByCluster[clusterOptions[0].value];
+  const totalGain = benefitBars.reduce((sum, item) => sum + item.total, 0);
 
   async function createRun() {
     setSubmitting(true);
@@ -114,32 +184,93 @@ export function IdleDashboard() {
     <>
       <PageHeader eyebrow="Idle" title="闲时看板" description="展示夜间集群跑量、冗余机器台数、调整建议、收益预估与历史收益偏差。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成闲时策略</Button>} />
       <Spin spinning={policies.loading}>
-        <div className="wire-grid page-section">
-          <section className="wire-card dashboard-panel-wide">
-            <div className="wire-card-title">集群维度夜间跑量</div>
-            <div className="resource-chart tall-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={nightRuntime}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="time" /><YAxis /><Tooltip /><Line type="monotone" dataKey="clusterA" name="Cluster-A" stroke="#27d7ff" /><Line type="monotone" dataKey="clusterB" name="Cluster-B" stroke="#5dffb2" /><Line type="monotone" dataKey="clusterC" name="Cluster-C" stroke="#9b8cff" /><Line type="monotone" dataKey="fit" name="夜间拟合" stroke="#ffb347" strokeDasharray="5 5" /></LineChart></ResponsiveContainer></div>
+        <div className="idle-dashboard-grid page-section">
+          <section className="wire-card dashboard-panel-wide idle-runtime-card">
+            <div className="idle-card-head">
+              <div className="wire-card-title">闲时跑量预估</div>
+              <label className="idle-cluster-picker">
+                <span>集群:</span>
+                <Select value={selectedCluster} options={clusterOptions} onChange={setSelectedCluster} />
+              </label>
+            </div>
+            <div className="resource-chart tall-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={selectedRuntime} margin={{ top: 6, right: 8, left: 4, bottom: 2 }}>
+                  <CartesianGrid stroke="rgba(230, 247, 255, 0.3)" strokeDasharray="2 4" />
+                  <XAxis dataKey="time" tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} />
+                  <YAxis ticks={[0, 150000, 300000, 450000, 600000]} domain={[0, 600000]} tickFormatter={tpmTick} tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} width={48} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={numberTooltip} labelStyle={{ color: '#dff8ff' }} />
+                  <Legend verticalAlign="bottom" height={34} iconType="line" wrapperStyle={{ color: '#9fbfcb', paddingTop: 12 }} />
+                  <Line type="monotone" dataKey="dayBefore" name="前日闲时实跑" stroke="#27d7ff" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="yesterday" name="昨日闲时实跑" stroke="#5dffb2" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="forecast" name="明日移动平均预测" stroke="#ffb347" strokeWidth={2} dot={false} strokeDasharray="5 4" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           </section>
 
           <section className="wire-card dashboard-panel-wide">
             <div className="wire-card-title">每个集群冗余机器台数</div>
-            <div className="resource-chart tall-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={redundantMachines}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="cluster" /><YAxis /><Tooltip /><Bar dataKey="machines" name="冗余机器台数" radius={[10, 10, 4, 4]}>{redundantMachines.map((_, index) => <Cell key={index} fill={clusterBarColors[index % clusterBarColors.length]} />)}</Bar></BarChart></ResponsiveContainer></div>
+            <div className="resource-chart tall-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={redundantMachines} margin={{ top: 6, right: 8, left: 4, bottom: 2 }}>
+                  <CartesianGrid stroke="rgba(230, 247, 255, 0.3)" strokeDasharray="2 4" />
+                  <XAxis dataKey="cluster" tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} />
+                  <YAxis ticks={[0, 5, 10, 15, 20]} domain={[0, 20]} tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} width={34} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: '#dff8ff' }} />
+                  <Bar dataKey="machines" name="冗余机器台数" radius={[8, 8, 3, 3]}>
+                    {redundantMachines.map((_, index) => <Cell key={index} fill={clusterBarColors[index % clusterBarColors.length]} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </section>
 
-          <section className="wire-card dashboard-panel-wide">
+          <section className="wire-card dashboard-panel-wide idle-adjustment-card">
             <div className="wire-card-title">调整方案建议</div>
-            <Table size="small" rowKey="cluster" dataSource={clusterPlans} pagination={false} columns={[{ title: '集群', dataIndex: 'cluster' }, { title: '承接客户', dataIndex: 'customer' }, { title: '调整方案', dataIndex: 'move' }, { title: '水位线', dataIndex: 'watermark' }, { title: '冗余台数', dataIndex: 'redundant', render: numberText }]} />
+            <Table size="small" rowKey="cluster" dataSource={clusterPlans} pagination={false} columns={[
+              { title: '集群', dataIndex: 'cluster' },
+              { title: '承接客户', dataIndex: 'customer' },
+              { title: '调整方案', dataIndex: 'move' },
+              { title: '水位线', dataIndex: 'watermark' },
+              { title: '冗余台数', dataIndex: 'redundant', render: numberText },
+            ]} />
             {idlePolicies.length ? <Table<Policy> className="inner-table" size="small" rowKey="id" dataSource={idlePolicies} pagination={{ pageSize: 4 }} scroll={{ x: 'max-content' }} onRow={(record) => ({ onClick: () => openDetail(record) })} columns={[{ title: '策略编号', dataIndex: 'policy_no' }, { title: '算法', dataIndex: 'algorithm' }, { title: '预估收益', dataIndex: 'expected_revenue_gain', render: money }, { title: '生效时间', dataIndex: 'effective_from', render: dateText }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} /> : <EmptyState />}
           </section>
 
-          <section className="wire-card">
+          <section className="wire-card dashboard-panel-wide idle-revenue-panel">
             <div className="wire-card-title">预估收益</div>
-            <div className="circle-metric solo-metric"><strong>{money(totalGain)}</strong><span>闲时预估收益</span></div>
-            <div className="resource-chart short-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={idlePolicies.map((item) => ({ name: item.policy_no, gain: item.expected_off_peak_gain || item.expected_revenue_gain }))}><XAxis dataKey="name" /><YAxis /><Tooltip /><Bar dataKey="gain" name="预估收益" fill="#5dffb2" /></BarChart></ResponsiveContainer></div>
+            <div className="circle-metric solo-metric"><strong>{money(totalGain)}</strong><span>闲时总收益</span></div>
+            <div className="resource-chart short-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={benefitBars} margin={{ top: 6, right: 8, left: 4, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(230, 247, 255, 0.3)" strokeDasharray="2 4" />
+                  <XAxis dataKey="day" tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} />
+                  <YAxis ticks={[0, 6000, 11000, 17000, 22000]} domain={[0, 22000]} tickFormatter={revenueTick} tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} width={42} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={moneyTooltip} labelStyle={{ color: '#dff8ff' }} />
+                  <Bar dataKey="baseGain" stackId="gain" name="基础收益" fill="#27d7ff" radius={[0, 0, 4, 4]} />
+                  <Bar dataKey="shiftGain" stackId="gain" name="闲时增益" fill="#5dffb2" radius={[6, 6, 0, 0]} />
+                  <Line type="monotone" dataKey="target" name="收益趋势" stroke="#ffb347" strokeWidth={2} dot={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
           </section>
 
-          <section className="wire-card">
+          <section className="wire-card idle-history-panel">
             <div className="wire-card-title">历史收益累计及实际收益偏差分析</div>
-            <div className="resource-chart short-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={revenueTrend}><XAxis dataKey="day" /><YAxis /><Tooltip /><Line type="monotone" dataKey="expected" name="预估收益" stroke="#27d7ff" /><Line type="monotone" dataKey="actual" name="实际收益" stroke="#5dffb2" /><Line type="monotone" dataKey="gap" name="收益偏差" stroke="#ff5f6d" /></LineChart></ResponsiveContainer></div>
+            <div className="resource-chart short-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={revenueTrend} margin={{ top: 6, right: 8, left: 4, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(230, 247, 255, 0.22)" strokeDasharray="2 4" />
+                  <XAxis dataKey="day" tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} />
+                  <YAxis tick={axisTick} axisLine={{ stroke: 'rgba(230, 247, 255, 0.22)' }} tickLine={false} width={44} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={moneyTooltip} labelStyle={{ color: '#dff8ff' }} />
+                  <Line type="monotone" dataKey="expected" name="预估收益" stroke="#27d7ff" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="actual" name="实际收益" stroke="#5dffb2" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="gap" name="收益偏差" stroke="#ff5f6d" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
             <Table size="small" rowKey="day" dataSource={revenueTrend.slice(-4)} pagination={false} columns={[{ title: '日期', dataIndex: 'day' }, { title: '预估', dataIndex: 'expected', render: money }, { title: '实际', dataIndex: 'actual', render: money }, { title: '偏差', dataIndex: 'gap', render: money }]} />
           </section>
         </div>
