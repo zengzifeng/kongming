@@ -32,6 +32,16 @@ class BaseConfig:
 
     DASHBOARD_CACHE_TTL_SECONDS = 60
 
+    # ---- 时段(time_period)策略口径开关（默认生效，可回退）----
+    # 自建只算「本模型自建集群 provider」提供的量（provider 白名单）
+    SELF_PROVIDER_WHITELIST_ENABLED = os.environ.get("KONGMING_SELF_PROVIDER_WHITELIST", "1") == "1"
+    # 整户剔除的客户（转售/网络客户，量不计入切量考量），逗号分隔 customer_code
+    EXCLUDE_CUSTOMER_CODES = tuple(
+        c for c in os.environ.get("KONGMING_EXCLUDE_CUSTOMER_CODES", "C0005").split(",") if c
+    )
+    # 模型级供需再平衡：跨模型把富余机器挪给紧缺模型（仅满足峰值可承接 + 正收益 + 一台只搬一次）
+    MODEL_REBALANCE_ENABLED = os.environ.get("KONGMING_MODEL_REBALANCE", "1") == "1"
+
 
 class DevConfig(BaseConfig):
     DEBUG = True
@@ -41,6 +51,10 @@ class TestConfig(BaseConfig):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     SCHEDULER_ENABLED = False
+    # 测试基线：默认关闭新口径/再平衡，既有用例不受扰动；需要时用例内显式开启。
+    SELF_PROVIDER_WHITELIST_ENABLED = False
+    EXCLUDE_CUSTOMER_CODES = ()
+    MODEL_REBALANCE_ENABLED = False
 
 
 class ProdConfig(BaseConfig):

@@ -10,19 +10,52 @@ customer_sell_discounts（未签约用 default_discount）。各字段口径见 
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Iterable
 
 from ..extensions import db
-from ..models import Customer, CustomerSellDiscount, CustomerUsageHourly
+from ..models import ClusterResource, Customer, CustomerSellDiscount, CustomerUsageHourly
 from .base import DemandSnapshotItem
 
 SELF_SOURCE = "自建"
 VENDOR_SOURCE = "第三方"
 
 
+def _cfg(key: str, default):
+    """安全读取 Flask config（无 app 上下文时回退默认，保证可脱离 app 调用/测试）。"""
+    try:
+        from flask import current_app
+
+        return current_app.config.get(key, default)
+    except Exception:
+        return default
+
+
+def build_self_provider_whitelist() -> dict[str, set[str]]:
+    """自建 provider 白名单：最新 snapshot 各自建集群 raw_json.provider，按 deployed_model 聚合。
+    只有 provider ∈ 该模型白名单，才算「本模型自建集群」提供的真自建产能。"""
+    from sqlalchemy import func
+
+    latest = db.session.execute(db.select(func.max(ClusterResource.snapshot_date))).scalar()
+    if latest is None:
+        return {}
+    wl: dict[str, set[str]] = defaultdict(set)
+    rows = db.session.execute(
+        db.select(ClusterResource).where(ClusterResource.snapshot_date == latest)
+    ).scalars().all()
+    for r in rows:
+        prov = (r.raw_json or {}).get("provider")
+        if prov:
+            wl[r.deployed_model].add(prov)
+    return dict(wl)
+
+
 def build_usage_demand_items(
     default_discount: float = 1.0,
     default_input_ratio: float = 1.0,
     default_cache_hit_rate: float = 0.0,
+    *,
+    apply_self_provider_whitelist: bool | None = None,
+    exclude_customer_codes: Iterable[str] | None = None,
 ) -> list[DemandSnapshotItem]:
     """把实跑量按 (客户, 模型) 聚合成 DemandSnapshotItem 列表。
 
@@ -30,11 +63,23 @@ def build_usage_demand_items(
     - tpm_series ：按 data_time 升序的 [(iso, Σio/60)]，同一整点跨结算日的多条求和
     - input_ratio：Σtotal_input / Σoutput_token（分母 0 退化 default_input_ratio）
     - cache_hit_rate：Σcache_token / (Σcache_token + Σcache_miss_token)
-    - current_self_ratio：Σio[自建] / Σio
-    - current_vendor_ratios：{provider: Σio / Σio_total}（仅第三方行）
+    - current_self_ratio：Σio[真自建] / Σio
+    - current_vendor_ratios：{provider: Σio / Σio_total}（三方 + 被白名单剔除的错挂自建）
     - discount_rate：customer_sell_discounts.sell_discount，缺省 default_discount
+
+    口径开关（默认取 config，可回退）：
+    - apply_self_provider_whitelist：自建须 provider ∈ 本模型自建集群白名单，否则改判三方。
+    - exclude_customer_codes：整户剔除的 customer_code（转售/网络客户），其量不计入。
     """
+    if apply_self_provider_whitelist is None:
+        apply_self_provider_whitelist = _cfg("SELF_PROVIDER_WHITELIST_ENABLED", True)
+    if exclude_customer_codes is None:
+        exclude_customer_codes = _cfg("EXCLUDE_CUSTOMER_CODES", ())
+    exclude_codes = set(exclude_customer_codes or ())
+    whitelist = build_self_provider_whitelist() if apply_self_provider_whitelist else {}
+
     code_by_id = {c.id: c.customer_code for c in db.session.execute(db.select(Customer)).scalars()}
+    excluded_ids = {cid for cid, code in code_by_id.items() if code in exclude_codes}
 
     discount_by_pair: dict[tuple[int, str], float] = {}
     for s in db.session.execute(db.select(CustomerSellDiscount)).scalars():
@@ -66,6 +111,8 @@ def build_usage_demand_items(
     ).all()
 
     for (customer_id, model, data_time, io, ti, ot, ct, cmt, source, provider) in rows:
+        if customer_id in excluded_ids:
+            continue  # 整户剔除（转售/网络客户）
         pair = (customer_id, model)
         io = float(io or 0)
         ts = data_time.isoformat()
@@ -75,7 +122,11 @@ def build_usage_demand_items(
         tot_cache[pair] += float(ct or 0)
         tot_cache_miss[pair] += float(cmt or 0)
         tot_io[pair] += io
-        if source == SELF_SOURCE:
+        # 真自建 = 挂自建标记 且（未开白名单 或 provider ∈ 本模型自建集群白名单）
+        is_true_self = (source == SELF_SOURCE) and (
+            not apply_self_provider_whitelist or provider in whitelist.get(model, set())
+        )
+        if is_true_self:
             self_io[pair] += io
         else:
             vendor_io[pair][provider] += io

@@ -382,3 +382,87 @@ def test_time_period_shaved_customer_loss_counted_in_gain():
 
 
 
+
+
+# ---------------- C2. 模型级供需再平衡（跨模型抢机器）----------------
+def _rebalance_snapshot():
+    """富余模型 modelA(容量 100k、单客户峰值仅 20k) + 紧缺模型 modelB(容量 10k、两客户峰值合计 16k，
+    但各自单客户 gap<容量 → _plan_reallocation 逐客户触发不了)。modelB 单TPM收入更高。
+    期望：再平衡把 modelA 空转机器挪给 modelB，整体自建收入净增。"""
+    clusters = [
+        {"cluster_name": "self-A", "deployed_model": "modelA", "machine_count": 10,
+         "tpm_per_machine": 10_000, "current_redundant_tpm": 100_000, "current_redundant_machines": 8},
+        {"cluster_name": "self-B", "deployed_model": "modelB", "machine_count": 1,
+         "tpm_per_machine": 10_000, "current_redundant_tpm": 10_000, "current_redundant_machines": 0},
+    ]
+    vendors = [
+        {"vendor": "va", "model": "modelA", "quota_tpm": 500_000, "unit_cost": 0.0002, "unit_price": 0.0008},
+        {"vendor": "vb", "model": "modelB", "quota_tpm": 500_000, "unit_cost": 0.0002, "unit_price": 0.0020},
+    ]
+    prices = {
+        "modelA": {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.0005, "output_price": 0.0008},
+        "modelB": {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.0010, "output_price": 0.0020},
+    }
+
+    def dem(rid, model, peak, disc, sr):
+        return DemandSnapshotItem(
+            report_id=rid, customer_code=rid, model_name=model, expected_tpm=peak, expected_rpm=0,
+            discount_rate=disc, input_ratio=1.0, cache_hit_rate=0.0,
+            current_self_ratio=sr, current_vendor_ratios={"v": max(1 - sr, 0)},
+            tpm_series=_series(peak))
+
+    demands = [
+        dem("cA", "modelA", 20_000, 0.5, 0.5),   # 富余模型：峰值 20k << 容量 100k
+        # 紧缺模型：高自建比 → 单客户 vendor gap 极小(0.8k)，_plan_reallocation 逐客户装得下不触发；
+        # 但两客户峰值同刻叠加 16k > 容量 10k → 水位线削峰。唯有模型级再平衡能补容量。
+        dem("cB1", "modelB", 8_000, 0.9, 0.9),
+        dem("cB2", "modelB", 8_000, 0.9, 0.9),
+    ]
+    return demands, clusters, vendors, prices
+
+
+def _solve_rebalance(enable):
+    demands, clusters, vendors, prices = _rebalance_snapshot()
+    snap = PolicyInputSnapshot(
+        captured_at=datetime.now(timezone.utc), algorithm="time_period",
+        demands=demands, resources={"clusters": [dict(c) for c in clusters]},
+        monitoring={}, vendors=vendors,
+        params={"model_prices": prices, "enable_model_rebalance": enable})
+    return TimePeriodSolver().solve(snap)
+
+
+def test_model_rebalance_off_by_default():
+    # 不传 enable_model_rebalance → solver 默认关，无再平衡产物
+    demands, clusters, vendors, prices = _rebalance_snapshot()
+    snap = PolicyInputSnapshot(
+        captured_at=datetime.now(timezone.utc), algorithm="time_period",
+        demands=demands, resources={"clusters": [dict(c) for c in clusters]},
+        monitoring={}, vendors=vendors, params={"model_prices": prices})
+    result = TimePeriodSolver().solve(snap)
+    assert result.summary["model_rebalance"] == {}
+
+
+def test_model_rebalance_moves_surplus_to_constrained_and_gains():
+    off = _solve_rebalance(False).summary
+    on = _solve_rebalance(True).summary
+    rb = on["model_rebalance"]
+    # 有再平衡腾挪，且方向是 modelA(富余)→modelB(紧缺)
+    assert rb["moves"], "应产生跨模型腾挪"
+    assert any(m["from_cluster"] == "self-A" and m["to_cluster"] == "self-B" for m in rb["moves"])
+    # 整体自建收入净增（再平衡额外收益为正）
+    assert rb["extra_revenue_gain"] > 0
+    assert on["self_revenue_after"] > off["self_revenue_after"]
+    # 机器总量守恒
+    assert on["machines_total_after"] == on["machines_total_before"]
+    # 峰值可行性全 OK（不掉量）
+    assert all(f["feasible"] for f in on["peak_feasibility"].values())
+    # 反洗产能：无集群既供出又接收
+    donors = {c["cluster_name"] for c in rb["per_cluster"] if c["role"] == "donate"}
+    receivers = {c["cluster_name"] for c in rb["per_cluster"] if c["role"] == "receive"}
+    assert not (donors & receivers)
+
+
+def test_model_rebalance_conserves_machines_and_positive_each_move():
+    rb = _solve_rebalance(True).summary["model_rebalance"]
+    # 每一步腾挪净增为正（贪心只接受正收益）
+    assert all(m["gain"] > 0 for m in rb["moves"])

@@ -7,6 +7,7 @@ from .revenue_analysis_service import RevenueAnalysisService
 from .customer_tracking_service import CustomerTrackingService
 from .dashboard_service import DashboardService
 from .report_service import ReportService
+from .policy_report_service import PolicyReportService
 from .alert_service import AlertService
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "CustomerTrackingService",
     "DashboardService",
     "ReportService",
+    "PolicyReportService",
     "AlertService",
 ]

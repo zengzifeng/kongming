@@ -10,9 +10,18 @@
 from __future__ import annotations
 
 from ..extensions import db
-from ..models import ClusterResource, CustomerUsageHourly
+from ..models import ClusterResource, Customer, CustomerUsageHourly
 
 SELF_SOURCE = "自建"
+
+
+def _cfg(key: str, default):
+    try:
+        from flask import current_app
+
+        return current_app.config.get(key, default)
+    except Exception:
+        return default
 
 
 def _provider_by_cluster_name() -> dict[str, str]:
@@ -28,12 +37,12 @@ def _provider_by_cluster_name() -> dict[str, str]:
     return {r.cluster_name: (r.raw_json or {}).get("provider") for r in rows}
 
 
-def _current_self_tpm_by_provider() -> dict[str, float]:
-    """最新整点各 provider 的自建负载 TPM = Σinput_output/60。"""
+def _current_self_tpm_by_provider(exclude_customer_ids: set[int] | None = None) -> dict[str, float]:
+    """最新整点各 provider 的自建负载 TPM = Σinput_output/60（排除指定客户，与 demand 口径一致）。"""
     latest_dt = db.session.execute(db.select(db.func.max(CustomerUsageHourly.data_time))).scalar()
     if latest_dt is None:
         return {}
-    rows = db.session.execute(
+    stmt = (
         db.select(
             CustomerUsageHourly.provider,
             db.func.sum(CustomerUsageHourly.input_output),
@@ -43,18 +52,32 @@ def _current_self_tpm_by_provider() -> dict[str, float]:
             CustomerUsageHourly.data_time == latest_dt,
         )
         .group_by(CustomerUsageHourly.provider)
-    ).all()
+    )
+    if exclude_customer_ids:
+        stmt = stmt.where(CustomerUsageHourly.customer_id.notin_(exclude_customer_ids))
+    rows = db.session.execute(stmt).all()
     return {prov: float(io or 0) / 60.0 for prov, io in rows}
 
 
-def apply_current_redundancy(clusters: list[dict]) -> None:
+def apply_current_redundancy(clusters: list[dict], exclude_customer_codes=None) -> None:
     """就地为集群 dict 计算并写入当前负载/冗余字段。
 
     设置：current_tpm、current_redundant_tpm、current_redundant_machines。
     provider 无对应实跑量则当前负载记 0（整集群空闲）。
+    exclude_customer_codes（默认取 config）：整户剔除的客户，其量不计入自建负载，与 demand 口径一致。
     """
+    if exclude_customer_codes is None:
+        exclude_customer_codes = _cfg("EXCLUDE_CUSTOMER_CODES", ())
+    exclude_codes = set(exclude_customer_codes or ())
+    excluded_ids: set[int] = set()
+    if exclude_codes:
+        excluded_ids = {
+            c.id for c in db.session.execute(db.select(Customer)).scalars()
+            if c.customer_code in exclude_codes
+        }
+
     provider_map = _provider_by_cluster_name()
-    load_by_provider = _current_self_tpm_by_provider()
+    load_by_provider = _current_self_tpm_by_provider(excluded_ids)
 
     for c in clusters:
         provider = provider_map.get(c.get("cluster_name"))

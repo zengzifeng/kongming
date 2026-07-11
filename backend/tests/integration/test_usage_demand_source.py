@@ -1,9 +1,9 @@
 """usage_demand_source：验证从实跑量 + 售卖折扣构建 DemandSnapshotItem 的口径。"""
-from datetime import datetime
+from datetime import date, datetime
 
 from app.algorithms.usage_demand_source import build_usage_demand_items
 from app.extensions import db
-from app.models import Customer, CustomerSellDiscount, CustomerUsageHourly
+from app.models import ClusterResource, Customer, CustomerSellDiscount, CustomerUsageHourly
 
 
 def _usage(cust_id, model, dt, io, ti, ot, ct, cmt, source, provider):
@@ -78,3 +78,51 @@ def test_ratios_match_hand_calc(app):
     assert item.input_ratio == 2200 / 400
     # cache_hit_rate = Σcache/(Σcache+Σmiss) = (90+10)/((90+10)+(10+90)) = 100/200
     assert item.cache_hit_rate == 0.5
+
+
+# ---------------- 口径修订：自建 provider 白名单 + 剔除客户 ----------------
+def _cluster(name, model, provider):
+    return ClusterResource(
+        snapshot_date=date(2026, 7, 7), cluster_name=name, deployed_model=model,
+        machine_count=8, tpm_per_machine=2_600_000, total_capacity_tpm=20_800_000,
+        raw_json={"provider": provider},
+    )
+
+
+def _seed_whitelist(app):
+    """一个客户的 glm-5.1：真自建(白名单内 provider) + 错挂自建(白名单外 provider) + 三方。"""
+    cust = Customer(customer_code="C0200", name="混跑客户", level="B")
+    db.session.add(cust)
+    db.session.flush()
+    t = datetime(2026, 7, 7, 11, 0, 0)
+    db.session.add_all([
+        _cluster("GLM-5.1-FP8", "glm-5.1", "ksyun-glm5.1-qy-10056"),   # 本模型白名单 provider
+        # 自建标记 + 白名单内 provider：真自建 io=600
+        _usage(cust.id, "glm-5.1", t, 600, 600, 100, 0, 0, "自建", "ksyun-glm5.1-qy-10056"),
+        # 自建标记 + 白名单外 provider(GLM-4.7 集群)：应改判三方 io=400
+        _usage(cust.id, "glm-5.1", t, 400, 400, 100, 0, 0, "自建", "ksyun-glm47-qy-12003"),
+    ])
+    db.session.flush()
+    return cust
+
+
+def test_self_provider_whitelist_reclassifies_mislabeled(app):
+    _seed_whitelist(app)
+    # 关白名单（默认 TestConfig）：两条自建都算自建 → ratio=1.0
+    off = next(i for i in build_usage_demand_items(apply_self_provider_whitelist=False)
+               if i.customer_code == "C0200")
+    assert off.current_self_ratio == 1.0
+    # 开白名单：仅 ksyun-glm5.1 的 600 算真自建 → ratio=600/1000；错挂的 400 并入三方
+    on = next(i for i in build_usage_demand_items(apply_self_provider_whitelist=True)
+              if i.customer_code == "C0200")
+    assert on.current_self_ratio == 600 / 1000
+    assert "ksyun-glm47-qy-12003" in on.current_vendor_ratios
+    assert on.current_vendor_ratios["ksyun-glm47-qy-12003"] == 400 / 1000
+
+
+def test_exclude_customer_codes_drops_whole_customer(app):
+    _seed(app)  # C0100(glm-5.1) + C0101(glm-5.2)
+    codes = {i.customer_code for i in build_usage_demand_items(exclude_customer_codes=("C0101",))}
+    assert codes == {"C0100"}
+    codes_none = {i.customer_code for i in build_usage_demand_items(exclude_customer_codes=())}
+    assert codes_none == {"C0100", "C0101"}

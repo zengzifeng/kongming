@@ -27,6 +27,14 @@ class PolicyService:
                    params: dict | None = None, triggered_by: str = "manual") -> PolicyRun:
         # 默认（无 demand_ids）：从实跑量 + 平台定价主数据实时构建需求。
         # demand_ids 有值：手动/报备路径，从 demands 表按 id 取（前端指定新增客户需求评估时用）。
+        # 注入模型级再平衡开关（solver 从 snapshot.params 读，避免 solver 依赖 Flask config）。
+        from flask import current_app
+
+        params = dict(params or {})
+        params.setdefault(
+            "enable_model_rebalance",
+            current_app.config.get("MODEL_REBALANCE_ENABLED", True),
+        )
         if demand_ids:
             demands = self._load_demands(demand_ids)
             if not demands:

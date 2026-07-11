@@ -52,6 +52,9 @@ def main():
     # 物理正确：机器换模型时带着自己的硬件吞吐(源rate)走，目标模型容量只 +源rate（非目标rate）。
     # 用分数机器实现：目标 += 源rate/目标rate 台，使 目标容量增量 = (源rate/目标rate)×目标rate = 源rate。
     CARRY_RATE = "--carry-rate" in sys.argv
+    global ALLOW_CHURN
+    # --allow-churn：复现「未修反洗产能 bug」的旧版行为（允许集群既供出又接收→两跳中转套利）
+    ALLOW_CHURN = "--allow-churn" in sys.argv
     conn = sqlite3.connect(crun.DB)
     whitelist = crun.build_self_provider_whitelist(conn)
     id_by_name = {n: i for i, n in conn.execute("SELECT id, name FROM customers")}
@@ -108,7 +111,7 @@ def main():
         if model_of[src] == model_of[tgt] and rate_of[src] < rate_of[tgt] - EPS:
             return False
         # 反洗产能：源不能是曾经的接收方，目标不能是曾经的供出方（杜绝两跳中转套利）
-        if src in received or tgt in donated:
+        if not ALLOW_CHURN and (src in received or tgt in donated):
             return False
         # --rate-safe：跨模型也禁止「搬到更高 rate 集群」——机器随身带自己的硬件吞吐，
         # 不因换集群变快，杜绝 tpm_per_machine 幻影容量（+目标rate−源rate）。

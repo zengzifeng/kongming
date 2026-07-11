@@ -13,6 +13,7 @@ from ..schemas.policy_schema import (
     PolicyRunCreate,
 )
 from ..services import PolicyService
+from ..services.policy_report_service import PolicyReportService
 from ..utils.errors import NotFound
 from ..utils.pagination import parse_pagination
 from ..utils.response import paginated, success
@@ -90,6 +91,12 @@ def get_policy(policy_id: int):
         "policy": model_to_dict(policy),
         "actions": [model_to_dict(a) for a in actions],
     })
+
+
+@bp.get("/policies/<int:policy_id>/report")
+def get_policy_report(policy_id: int):
+    """时段策略结构化报告：逐调整收益(元/天) + 单TPM收入示例 + 集群利用率/共享池占用率 + 模型级再平衡。"""
+    return success(PolicyReportService().build(policy_id))
 
 
 @bp.patch("/policies/<int:policy_id>")

@@ -68,6 +68,16 @@ class TimePeriodSolver(SolverEconomicsMixin):
         machines_before = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
         node_moves, accepted, rejected = self._plan_reallocation(
             candidates, clusters, rejected, timeline, min_self_required)
+
+        # ---- C2. 模型级供需再平衡（跨模型抢机器）：把「容量≫峰值需求」的富余模型机器，挪给
+        #      「需求>容量、量堆三方」的紧缺模型。**solver 内默认关**（保持直接调用/既有测试基线不变）；
+        #      生产由 policy_service 按 config MODEL_REBALANCE_ENABLED(默认True) 注入 params 打开。
+        #      约束：峰值可承接 + 整体自建收入净增 + 一台机器只搬一次（反两跳中转套利）+ 专属只供不收。
+        rebalance_diag: dict = {}
+        if snapshot.params.get("enable_model_rebalance", False):
+            moves2, rebalance_diag = self._rebalance_by_model_gap(
+                candidates, clusters, timeline, peak_demand, vendor_cap)
+            node_moves = node_moves + moves2
         machines_after = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
 
         # 成案终检：机器挪动后，逐模型「自建+三方」是否仍覆盖该模型客户波形峰值。
@@ -137,6 +147,11 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 "self_tpm_integral_after": after["self_tpm_integral"],
                 "machines_total_before": sum(machines_before.values()),
                 "machines_total_after": sum(machines_after.values()),
+                "machines_before": machines_before,
+                "machines_after": machines_after,
+                # 报告依赖（summary 才入库；diagnostics 不持久化）
+                "peak_feasibility": feasibility,
+                "model_rebalance": rebalance_diag,
             },
         )
 
@@ -414,6 +429,151 @@ class TimePeriodSolver(SolverEconomicsMixin):
             take = min(remaining, room)
             reserved[name] = reserved.get(name, 0.0) + take
             remaining -= take
+
+    # ---------------- C2. 模型级供需再平衡（跨模型抢机器） ----------------
+    def _rebalance_by_model_gap(self, candidates, clusters, timeline, peak_demand, vendor_cap,
+                                max_moves: int = 200) -> tuple[list[dict], dict]:
+        """在 _plan_reallocation 之后，跨模型做「最陡上升单台贪心」腾挪，最大化全体自建收入积分。
+
+        每步枚举所有 (源→目标) 单台腾挪，用 _compute_watermarks + _integrate 在新配置下重算总自建收入，
+        取「净增最大且为正」的一台落地；直到无正收益或到 max_moves。约束（全部复用现有 helper）：
+          ① 峰值可承接：_check_peak_feasibility 全模型 slack≥0（源模型不会被搬到接不住峰值）；
+          ② 每步整体自建收入净增 > 0；
+          ③ 一台机器只搬一次：集群不能既供出又接收（杜绝 A→B→C 两跳中转把同模型 rate 套利洗过来）；
+          ④ 专属集群（KSCC/XISHANJU）只供不收，且保留最小台数；⑤ 禁同模型低→高 rate 套利。
+        就地更新 cluster machine_count；返回 (node_moves, rebalance_diag)。
+        """
+        by_name = {c["cluster_name"]: c for c in clusters}
+        rate_of = {c["cluster_name"]: float(c.get("tpm_per_machine", 0) or 0) for c in clusters}
+        model_of = {c["cluster_name"]: c["deployed_model"] for c in clusters}
+        names = [c["cluster_name"] for c in clusters]
+
+        def donatable(name):
+            return int(by_name[name].get("machine_count", 0) or 0) - self._min_reserve_machines(by_name[name])
+
+        def total_self_revenue():
+            wm, _ = self._compute_watermarks(candidates, clusters, timeline)
+            return self._integrate(candidates, wm, timeline, adjust=True)["self_revenue"], wm
+
+        def peak_ok():
+            feas = self._check_peak_feasibility(clusters, peak_demand, vendor_cap)
+            return all(f["feasible"] for f in feas.values())
+
+        donated: set[str] = set()
+        received: set[str] = set()
+
+        def legal(src, tgt):
+            if src == tgt or donatable(src) < 1:
+                return False
+            if model_of[src] == model_of[tgt] and rate_of[src] < rate_of[tgt] - EPS:
+                return False  # 禁同模型 rate 套利
+            if src in received or tgt in donated:
+                return False  # 反洗产能：一台机器只搬一次
+            return True
+
+        machines_start = {n: int(by_name[n].get("machine_count", 0) or 0) for n in names}
+        base_rev, wm_base = total_self_revenue()
+        moves: list[dict] = []
+        while len(moves) < max_moves:
+            cur_rev, _ = total_self_revenue()
+            best = None
+            for s in names:
+                if donatable(s) < 1:
+                    continue
+                for t in names:
+                    if not legal(s, t):
+                        continue
+                    by_name[s]["machine_count"] -= 1
+                    by_name[t]["machine_count"] += 1
+                    ok = peak_ok()
+                    rev = total_self_revenue()[0] if ok else float("-inf")
+                    by_name[s]["machine_count"] += 1
+                    by_name[t]["machine_count"] -= 1
+                    if ok and rev - cur_rev > EPS and (best is None or rev > best[2]):
+                        best = (s, t, rev)
+            if best is None or best[2] - cur_rev <= EPS:
+                break
+            s, t, rev = best
+            by_name[s]["machine_count"] -= 1
+            by_name[t]["machine_count"] += 1
+            donated.add(s)
+            received.add(t)
+            moves.append({
+                "from_cluster": s, "to_cluster": t, "model": model_of[t],
+                "machine_count": 1, "added_tpm": rate_of[t], "removed_tpm": rate_of[s],
+                "from_tpm_per_machine": rate_of[s], "to_tpm_per_machine": rate_of[t],
+                "gain": rev - cur_rev,
+                "reason": (f"模型级再平衡：{model_of[s]}(富余)→{model_of[t]}(紧缺) "
+                           f"净增自建收入，承接紧缺模型客户"),
+            })
+        final_rev, wm_final = total_self_revenue()
+        diag = self._rebalance_diag(candidates, clusters, moves, machines_start,
+                                    wm_base, wm_final, base_rev, final_rev)
+        return moves, diag
+
+    def _rebalance_diag(self, candidates, clusters, moves, machines_start,
+                        wm_base, wm_final, base_rev, final_rev) -> dict:
+        """再平衡影响归因：逐客户水位线 base→final、逐模型 Σ水位线/共享容量 前后、逐集群角色与受益客户。"""
+        rid2 = {c.demand.report_id: (c.demand.customer_code, c.demand.model_name) for c in candidates}
+        cust_delta: list[dict] = []
+        for rid in set(wm_base) | set(wm_final):
+            code, mdl = rid2.get(rid, (None, None))
+            if mdl is None:
+                continue
+            b, a = wm_base.get(rid, 0.0), wm_final.get(rid, 0.0)
+            if abs(a - b) < 1.0:
+                continue
+            cust_delta.append({"customer_code": code, "model": mdl,
+                               "watermark_before": b, "watermark_after": a, "delta": a - b})
+        by_model_delta: dict[str, list] = {}
+        for x in cust_delta:
+            by_model_delta.setdefault(x["model"], []).append(x)
+        for m in by_model_delta:
+            by_model_delta[m].sort(key=lambda z: -z["delta"])
+
+        def swm(wm):
+            out: dict[str, float] = {}
+            for c in candidates:
+                out[c.demand.model_name] = out.get(c.demand.model_name, 0.0) + wm.get(c.demand.report_id, 0.0)
+            return out
+
+        def shared_cap(mc):
+            out: dict[str, float] = {}
+            for c in clusters:
+                if not self._is_dedicated(c):
+                    out[c["deployed_model"]] = out.get(c["deployed_model"], 0.0) + \
+                        mc[c["cluster_name"]] * float(c.get("tpm_per_machine", 0) or 0)
+            return out
+
+        now_mc = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
+        swm_b, swm_a = swm(wm_base), swm(wm_final)
+        shared_b, shared_a = shared_cap(machines_start), shared_cap(now_mc)
+        per_model = [{"model": m, "swm_before": swm_b.get(m, 0.0), "swm_after": swm_a.get(m, 0.0),
+                      "shared_cap_before": shared_b.get(m, 0.0), "shared_cap_after": shared_a.get(m, 0.0)}
+                     for m in sorted(set(list(swm_b) + list(swm_a)))]
+        per_cluster = []
+        for c in sorted(clusters, key=lambda x: (x["deployed_model"], x["cluster_name"])):
+            nm, mdl = c["cluster_name"], c["deployed_model"]
+            mb, ma = machines_start[nm], now_mc[nm]
+            dm = ma - mb
+            role = "receive" if dm > 0 else ("donate" if dm < 0 else "none")
+            gl = by_model_delta.get(mdl, [])
+            per_cluster.append({
+                "cluster_name": nm, "model": mdl, "rate": float(c.get("tpm_per_machine", 0) or 0),
+                "dedicated": self._is_dedicated(c), "machines_before": mb, "machines_after": ma,
+                "delta_machines": dm, "role": role,
+                "gainers": [g for g in gl if g["delta"] > 0][:4] if role == "receive" else [],
+                "losers": [g for g in gl if g["delta"] < 0][:3] if role == "donate" else [],
+            })
+        return {
+            "moves": moves,
+            "self_revenue_before": base_rev,
+            "self_revenue_after": final_rev,
+            "extra_revenue_gain": final_rev - base_rev,
+            "per_model": per_model,
+            "per_cluster": per_cluster,
+            "customer_watermark_delta": cust_delta,
+        }
 
     # ---------------- D. 固定水位线 + 时序积分 ----------------
     def _compute_watermarks(self, accepted, clusters, timeline) -> tuple[dict[str, float], list[_Candidate]]:
