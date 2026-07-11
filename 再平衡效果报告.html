@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>模型级供需再平衡 · 效果报告</title>
+<style>
+:root{--bg:#fbfbfa;--card:#fff;--ink:#111;--sub:#5a5a54;--mut:#8f8e84;--line:#e6e5e1;
+  --b:#8f8e84;--a:#2a78d6;--pos:#1a9e57;--neg:#d64545;--band:#f4f3f0;--accent:#6b4de6;--warn:#eb6834;}
+@media(prefers-color-scheme:dark){:root{--bg:#161615;--card:#1f1f1d;--ink:#f4f4f0;--sub:#c2c1b6;--mut:#8f8e84;
+  --line:#33332f;--a:#3987e5;--band:#252523;}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.5}
+.wrap{max-width:1080px;margin:0 auto;padding:30px 26px 70px}
+h1{font-size:23px;margin:0 0 6px;font-weight:680}
+h2{font-size:17px;margin:34px 0 12px;font-weight:660;display:flex;align-items:center;gap:9px}
+h2 .n{background:var(--accent);color:#fff;width:23px;height:23px;border-radius:6px;font-size:13px;
+  display:inline-flex;align-items:center;justify-content:center;flex:none}
+.lead{color:var(--sub);font-size:13.5px;margin:0 0 3px}
+.kpis{display:flex;gap:14px;flex-wrap:wrap;margin:18px 0 6px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:13px 17px;min-width:160px}
+.kpi .l{font-size:11.5px;color:var(--mut)}
+.kpi .v{font-size:22px;font-weight:700;margin-top:3px}
+.kpi .v.pos{color:var(--pos)}.kpi .v.a{color:var(--a)}
+.kpi .d{font-size:11px;color:var(--sub);margin-top:2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:6px 9px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mut);font-weight:600;font-size:11px}
+td.l,th.l{text-align:left}
+tr.chg td{background:var(--band)}
+.mono{font-family:ui-monospace,"SF Mono",monospace;font-size:11.5px}
+.pos{color:var(--pos)}.neg{color:var(--neg)}
+.tag{font-size:10.5px;padding:1px 6px;border-radius:5px}
+.tag.up{background:#1a9e5722;color:var(--pos)}.tag.dn{background:#d6454522;color:var(--neg)}
+.bar{position:relative;height:15px;background:var(--band);border-radius:4px;overflow:hidden;min-width:120px}
+.bar>span{position:absolute;left:0;top:0;height:100%;border-radius:4px}
+.util-b{background:var(--b)}.util-a{background:var(--a)}
+.dual{display:flex;flex-direction:column;gap:3px}
+.dual .row{display:flex;align-items:center;gap:7px;font-size:11px}
+.dual .row .k{width:26px;color:var(--mut)}
+.flowline{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 0;border-bottom:1px solid var(--line)}
+.arrow{color:var(--warn);font-weight:700}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--sub);margin:6px 0}
+.legend .it{display:flex;align-items:center;gap:6px}.sw{width:13px;height:10px;border-radius:2px}
+svg{display:block;width:100%;overflow:visible}.ax{font-size:9px;fill:var(--mut)}
+.foot{color:var(--mut);font-size:11.5px;margin-top:30px;border-top:1px solid var(--line);padding-top:12px}
+.note{background:var(--band);border-radius:8px;padding:10px 13px;font-size:12px;color:var(--sub);margin:8px 0;line-height:1.7}
+.imp{padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.imp:last-child{border-bottom:none}
+.impbody{color:var(--sub);font-size:12.5px;margin-top:3px;line-height:1.6}
+.badge{display:inline-block;padding:1px 8px;border-radius:5px;font-size:11px;font-weight:600;margin-right:6px}
+.b-recv{background:#1a9e5722;color:var(--pos)}.b-don{background:#eb683422;color:var(--warn)}.b-none{background:var(--band);color:var(--mut)}
+.mut{color:var(--mut)}
+ul.ben{margin:4px 0 0;padding-left:18px}ul.ben li{margin:1px 0}
+</style></head>
+<body><div class="wrap" id="root"></div>
+<script>
+const D={"mode": "剔除金山云网络", "rate_mode": "target-rate", "base": 308042.9281712891, "final": 342945.48362848663, "extra": 34902.55545719753, "n_moves": 23, "clusters": [{"name": "DeepSeek-V3.2", "model": "deepseek-v3.2", "rate": 2600000.0, "mb": 10, "ma": 10.0}, {"name": "GLM-5.1-FP8", "model": "glm-5.1", "rate": 2600000.0, "mb": 8, "ma": 20.0}, {"name": "GLM-5.1-KSCC", "model": "glm-5.1", "rate": 7000000.0, "mb": 3, "ma": 2.0}, {"name": "GLM-5.1-XISHANJU", "model": "glm-5.1", "rate": 3000000.0, "mb": 2, "ma": 2.0}, {"name": "GLM-5.2", "model": "glm-5.2", "rate": 2000000.0, "mb": 32, "ma": 10.0}, {"name": "GLM-5.2-TENCENT", "model": "glm-5.2", "rate": 2200000.0, "mb": 8, "ma": 8.0}, {"name": "kimi-k2.5-nvfp4-mihayou", "model": "kimi-k2.5", "rate": 2500000.0, "mb": 14, "ma": 24.0}, {"name": "kimi-k2.6-mihayou", "model": "kimi-k2.6", "rate": 3000000.0, "mb": 4, "ma": 5.0}], "model_rows": [{"model": "deepseek-v3.2", "participates": false, "cap_b": 26000000.0, "cap_a": 26000000.0, "load_b": null, "load_a": null, "util_b": null, "util_a": null, "swm_b": null, "shared_b": null, "swm_a": null, "shared_a": null, "occ_b": null, "occ_a": null, "peak": 24933321.283333335, "vendor_cap": 0.0}, {"model": "glm-5.1", "participates": true, "cap_b": 47800000.0, "cap_a": 72000000.0, "load_b": 20476675.449999996, "load_a": 50105666.666666694, "util_b": 0.4283823315899581, "util_a": 0.6959120370370374, "swm_b": 20799999.999999996, "shared_b": 20800000.0, "swm_a": 52000000.00000003, "shared_a": 52000000.0, "occ_b": 0.9999999999999998, "occ_a": 1.0000000000000007, "peak": 62182005.8, "vendor_cap": 90000000.0}, {"model": "glm-5.2", "participates": true, "cap_b": 81600000.0, "cap_a": 37600000.0, "load_b": 31385730.583333336, "load_a": 30958982.316666666, "util_b": 0.3846290512663399, "util_a": 0.8233771892730496, "swm_b": 42892487.21666667, "shared_b": 81600000.0, "swm_a": 37600000.000000015, "shared_a": 37600000.0, "occ_b": 0.5256432256944444, "occ_a": 1.0000000000000004, "peak": 31385730.583333336, "vendor_cap": 52000000.0}, {"model": "kimi-k2.5", "participates": true, "cap_b": 35000000.0, "cap_a": 60000000.0, "load_b": 35000000.0, "load_a": 59919754.88333337, "util_b": 1.0, "util_a": 0.9986625813888895, "swm_b": 35000000.0, "shared_b": 35000000.0, "swm_a": 60000000.00000004, "shared_a": 60000000.0, "occ_b": 1.0, "occ_a": 1.0000000000000007, "peak": 66340256.3, "vendor_cap": 60000000.0}, {"model": "kimi-k2.6", "participates": true, "cap_b": 12000000.0, "cap_a": 15000000.0, "load_b": 8540100.866666667, "load_a": 9215774.433333334, "util_b": 0.7116750722222223, "util_a": 0.6143849622222223, "swm_b": 12000000.0, "shared_b": 12000000.0, "swm_a": 13103158.383333333, "shared_a": 15000000.0, "occ_b": 1.0, "occ_a": 0.8735438922222222, "peak": 9215774.433333334, "vendor_cap": 100000000.0}], "flows": [{"src": "GLM-5.2", "tgt": "kimi-k2.5-nvfp4-mihayou", "src_model": "glm-5.2", "tgt_model": "kimi-k2.5", "src_rate": 2000000.0, "tgt_rate": 2500000.0, "n": 10, "gain": 17576.045860896662}, {"src": "GLM-5.2", "tgt": "GLM-5.1-FP8", "src_model": "glm-5.2", "tgt_model": "glm-5.1", "src_rate": 2000000.0, "tgt_rate": 2600000.0, "n": 12, "gain": 16643.061904242666}, {"src": "GLM-5.1-KSCC", "tgt": "kimi-k2.6-mihayou", "src_model": "glm-5.1", "tgt_model": "kimi-k2.6", "src_rate": 7000000.0, "tgt_rate": 3000000.0, "n": 1, "gain": 683.4476920582008}], "curve": [{"step": 1, "gain": 3210.854948822594, "cum": 311253.7831201117}, {"step": 2, "gain": 3195.3167245915606, "cum": 314449.0998447033}, {"step": 3, "gain": 2846.4770991395762, "cum": 317295.5769438428}, {"step": 4, "gain": 2547.0516598165514, "cum": 319842.6286036594}, {"step": 5, "gain": 2455.629641485977, "cum": 322298.2582451454}, {"step": 6, "gain": 2385.907183057995, "cum": 324684.16542820336}, {"step": 7, "gain": 2064.3579541030313, "cum": 326748.5233823064}, {"step": 8, "gain": 2033.1979279567909, "cum": 328781.72131026315}, {"step": 9, "gain": 1713.676483294716, "cum": 330495.3977935579}, {"step": 10, "gain": 1706.974103281231, "cum": 332202.3718968391}, {"step": 11, "gain": 1604.549535506916, "cum": 333806.92143234605}, {"step": 12, "gain": 1343.690072398224, "cum": 335150.6115047443}, {"step": 13, "gain": 1085.0431921024704, "cum": 336235.65469684673}, {"step": 14, "gain": 1015.1291387643242, "cum": 337250.7838356111}, {"step": 15, "gain": 963.2564846467782, "cum": 338214.04032025783}, {"step": 16, "gain": 963.2564846467782, "cum": 339177.2968049046}, {"step": 17, "gain": 886.2212064164544, "cum": 340063.5180113211}, {"step": 18, "gain": 813.2791711827279, "cum": 340876.7971825038}, {"step": 19, "gain": 813.2791711827279, "cum": 341690.0763536865}, {"step": 20, "gain": 683.4476920582008, "cum": 342373.52404574474}, {"step": 21, "gain": 461.7325918085861, "cum": 342835.25663755334}, {"step": 22, "gain": 95.48510219896316, "cum": 342930.7417397523}, {"step": 23, "gain": 14.741888734359742, "cum": 342945.48362848663}], "cluster_impact": [{"name": "DeepSeek-V3.2", "model": "deepseek-v3.2", "mb": 10, "ma": 10.0, "dm": 0.0, "rate": 2600000.0, "dedicated": false, "role": "none", "gainers": [], "losers": [], "occ_b": 0.0, "occ_a": 0.0, "participates": true}, {"name": "GLM-5.1-FP8", "model": "glm-5.1", "mb": 8, "ma": 20.0, "dm": 12.0, "rate": 2600000.0, "dedicated": false, "role": "receive", "gainers": [{"cust": "科大讯飞股份有限公司", "wm_b": 10171644.666666664, "wm_a": 40173022.40000003, "d": 30001377.733333364}, {"cust": "珠海金山办公软件有限公司", "wm_b": 717862.7, "wm_a": 1302106.2833333334, "d": 584243.5833333335}, {"cust": "BODHIMIND SDN.BHD.", "wm_b": 8723901.716666667, "wm_a": 9150638.25, "d": 426736.5333333332}, {"cust": "北京金山数字娱乐科技有限公司", "wm_b": 41360.433333333334, "wm_a": 147585.35, "d": 106224.91666666667}], "losers": [], "occ_b": 0.9999999999999998, "occ_a": 1.0000000000000007, "participates": true}, {"name": "GLM-5.1-KSCC", "model": "glm-5.1", "mb": 3, "ma": 2.0, "dm": -1.0, "rate": 7000000.0, "dedicated": true, "role": "donate", "gainers": [{"cust": "科大讯飞股份有限公司", "wm_b": 10171644.666666664, "wm_a": 40173022.40000003, "d": 30001377.733333364}, {"cust": "珠海金山办公软件有限公司", "wm_b": 717862.7, "wm_a": 1302106.2833333334, "d": 584243.5833333335}, {"cust": "BODHIMIND SDN.BHD.", "wm_b": 8723901.716666667, "wm_a": 9150638.25, "d": 426736.5333333332}, {"cust": "北京金山数字娱乐科技有限公司", "wm_b": 41360.433333333334, "wm_a": 147585.35, "d": 106224.91666666667}], "losers": [], "occ_b": 0.9999999999999998, "occ_a": 1.0000000000000007, "participates": true}, {"name": "GLM-5.1-XISHANJU", "model": "glm-5.1", "mb": 2, "ma": 2.0, "dm": 0.0, "rate": 3000000.0, "dedicated": true, "role": "none", "gainers": [{"cust": "科大讯飞股份有限公司", "wm_b": 10171644.666666664, "wm_a": 40173022.40000003, "d": 30001377.733333364}, {"cust": "珠海金山办公软件有限公司", "wm_b": 717862.7, "wm_a": 1302106.2833333334, "d": 584243.5833333335}, {"cust": "BODHIMIND SDN.BHD.", "wm_b": 8723901.716666667, "wm_a": 9150638.25, "d": 426736.5333333332}, {"cust": "北京金山数字娱乐科技有限公司", "wm_b": 41360.433333333334, "wm_a": 147585.35, "d": 106224.91666666667}], "losers": [], "occ_b": 0.9999999999999998, "occ_a": 1.0000000000000007, "participates": true}, {"name": "GLM-5.2", "model": "glm-5.2", "mb": 32, "ma": 10.0, "dm": -22.0, "rate": 2000000.0, "dedicated": false, "role": "donate", "gainers": [], "losers": [{"cust": "珠海金山办公软件有限公司", "wm_b": 582013.6166666667, "wm_a": 507226.38333333336, "d": -74787.23333333334}, {"cust": "上海阶跃纪元智能科技有限公司", "wm_b": 6952743.45, "wm_a": 6618826.883333334, "d": -333916.5666666664}, {"cust": "上海矩阵超智系统集成有限公司", "wm_b": 4035666.466666667, "wm_a": 3680186.45, "d": -355480.0166666666}], "occ_b": 0.5256432256944444, "occ_a": 1.0000000000000004, "participates": true}, {"name": "GLM-5.2-TENCENT", "model": "glm-5.2", "mb": 8, "ma": 8.0, "dm": 0.0, "rate": 2200000.0, "dedicated": false, "role": "none", "gainers": [], "losers": [{"cust": "珠海金山办公软件有限公司", "wm_b": 582013.6166666667, "wm_a": 507226.38333333336, "d": -74787.23333333334}, {"cust": "上海阶跃纪元智能科技有限公司", "wm_b": 6952743.45, "wm_a": 6618826.883333334, "d": -333916.5666666664}, {"cust": "上海矩阵超智系统集成有限公司", "wm_b": 4035666.466666667, "wm_a": 3680186.45, "d": -355480.0166666666}], "occ_b": 0.5256432256944444, "occ_a": 1.0000000000000004, "participates": true}, {"name": "kimi-k2.5-nvfp4-mihayou", "model": "kimi-k2.5", "mb": 14, "ma": 24.0, "dm": 10.0, "rate": 2500000.0, "dedicated": false, "role": "receive", "gainers": [{"cust": "珠海金山办公软件有限公司", "wm_b": 33687620.233333334, "wm_a": 53482539.68333337, "d": 19794919.450000033}, {"cust": "腾讯云计算（北京）有限责任公司", "wm_b": 1207740.55, "wm_a": 4904671.216666667, "d": 3696930.666666667}, {"cust": "上海阶跃纪元智能科技有限公司", "wm_b": 92661.08333333333, "wm_a": 1241456.6833333333, "d": 1148795.6}, {"cust": "优刻得科技股份有限公司", "wm_b": 0.0, "wm_a": 344552.51666666666, "d": 344552.51666666666}], "losers": [], "occ_b": 1.0, "occ_a": 1.0000000000000007, "participates": true}, {"name": "kimi-k2.6-mihayou", "model": "kimi-k2.6", "mb": 4, "ma": 5.0, "dm": 1.0, "rate": 3000000.0, "dedicated": false, "role": "receive", "gainers": [{"cust": "珠海金山办公软件有限公司", "wm_b": 4347080.616666666, "wm_a": 5160792.25, "d": 813711.6333333338}, {"cust": "成都西山居世游科技有限公司", "wm_b": 148164.46666666667, "wm_a": 369124.88333333336, "d": 220960.4166666667}, {"cust": "BODHIMIND SDN.BHD.", "wm_b": 7504754.916666668, "wm_a": 7562644.966666667, "d": 57890.04999999888}, {"cust": "北京金山数字娱乐科技有限公司", "wm_b": 0.0, "wm_a": 10596.283333333333, "d": 10596.283333333333}], "losers": [], "occ_b": 1.0, "occ_a": 0.8735438922222222, "participates": true}], "feasibility": {"glm-5.1": {"peak_demand": 62182005.8, "self_cap": 72000000.0, "vendor_cap": 90000000.0, "total_cap": 162000000.0, "slack": 99817994.2, "feasible": true}, "glm-5.2": {"peak_demand": 31385730.583333336, "self_cap": 37600000.0, "vendor_cap": 52000000.0, "total_cap": 89600000.0, "slack": 58214269.416666664, "feasible": true}, "kimi-k2.6": {"peak_demand": 9215774.433333334, "self_cap": 15000000.0, "vendor_cap": 100000000.0, "total_cap": 115000000.0, "slack": 105784225.56666666, "feasible": true}, "deepseek-v3.2": {"peak_demand": 24933321.283333335, "self_cap": 26000000.0, "vendor_cap": 0.0, "total_cap": 26000000.0, "slack": 1066678.716666665, "feasible": true}, "kimi-k2.5": {"peak_demand": 66340256.3, "self_cap": 60000000.0, "vendor_cap": 60000000.0, "total_cap": 120000000.0, "slack": 53659743.7, "feasible": true}}};
+const W=(x)=> (x/1e4).toLocaleString('en',{maximumFractionDigits:1})+'w';
+const RMB=(x)=> '¥'+Math.round(x).toLocaleString('en');
+const RMBw=(x)=> (x/1e4).toLocaleString('en',{maximumFractionDigits:2})+'万';
+const P=(x)=> (x*100).toFixed(0)+'%';
+const root=document.getElementById('root');
+function el(h){const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstChild;}
+
+root.appendChild(el(`<div>
+ <h1>模型级供需再平衡 · 效果报告</h1>
+ <p class="lead">在原 time_period 策略之上，补一层<b>跨模型抢机器</b>：把「容量≫需求」的富余模型机器，挪给「需求&gt;容量、量堆在三方」的紧缺模型。
+ 口径：单机吞吐按<b>目标集群速率</b>；仅当<b>峰值可承接 + 整体收入净增</b>才挪（源集群同步更激进削峰）。${D.mode}。收益=元/天。</p>
+</div>`));
+
+/* KPI */
+const kp=el(`<div class="kpis"></div>`);
+[['原策略自建收入',RMBw(D.base)+'元/天','a','原 solver 腾挪+削峰后'],
+ ['再平衡后自建收入',RMBw(D.final)+'元/天','a','跨模型抢机器后'],
+ ['再平衡额外收益','+'+RMBw(D.extra)+'元/天','pos','≈ '+Math.round(D.extra*30/1e4)+'万元/月 · '+(D.extra*365/1e8).toFixed(2)+'亿元/年'],
+ ['腾挪机器',D.n_moves+' 台','a','机器总量守恒(仅跨集群重分配)'],
+].forEach(([l,v,c,d])=>kp.appendChild(el(`<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div><div class="d">${d}</div></div>`)));
+root.appendChild(kp);
+
+/* ① 腾挪流向 */
+root.appendChild(el(`<h2><span class="n">1</span>机器腾挪流向（源模型富余 → 目标模型紧缺）</h2>`));
+const fc=el(`<div class="card"></div>`);
+D.flows.forEach(f=>{
+  fc.appendChild(el(`<div class="flowline">
+   <span style="min-width:210px" class="l"><b>${f.src}</b> <span class="mono" style="color:var(--mut)">${f.src_model} ${W(f.src_rate)}/台</span></span>
+   <span class="arrow">→ ${f.n}台 →</span>
+   <span style="flex:1" class="l"><b>${f.tgt}</b> <span class="mono" style="color:var(--mut)">${f.tgt_model} ${W(f.tgt_rate)}/台</span></span>
+   <span class="pos"><b>+${RMB(f.gain)}</b>/天</span>
+  </div>`));
+});
+root.appendChild(fc);
+
+/* ② 集群机器数 前→后 */
+root.appendChild(el(`<h2><span class="n">2</span>各集群机器数：原策略 → 再平衡后</h2>`));
+const ct=el(`<div class="card" style="overflow-x:auto"><table>
+ <thead><tr><th class="l">集群</th><th class="l">模型</th><th>单台承载</th><th>机器数 前→后</th><th>自建容量 前→后</th></tr></thead>
+ <tbody id="cb"></tbody></table></div>`);
+root.appendChild(ct);
+const cb=ct.querySelector('#cb');
+D.clusters.forEach(c=>{
+  const chg=Math.abs(c.mb-c.ma)>1e-6;
+  const d=c.ma-c.mb;
+  const tag=chg?`<span class="tag ${d>0?'up':'dn'}">${d>0?'+':''}${(+d.toFixed(2))}</span>`:'';
+  cb.appendChild(el(`<tr class="${chg?'chg':''}">
+   <td class="l">${c.name}</td><td class="l mono">${c.model}</td><td>${W(c.rate)}</td>
+   <td>${(+c.mb.toFixed(2))} → ${(+c.ma.toFixed(2))} ${tag}</td>
+   <td class="mono">${W(c.mb*c.rate)} → ${W(c.ma*c.rate)}</td>
+  </tr>`));
+});
+
+/* ③ 逐集群腾挪影响 */
+root.appendChild(el(`<h2><span class="n">3</span>逐集群腾挪影响（谁受益 / 谁能供出）</h2>`));
+const ic=el(`<div class="card"></div>`);
+D.cluster_impact.forEach(c=>{
+  const d=c.ma-c.mb;
+  if(c.role==='none'){
+    const why = !c.participates ? '无三方额度，不参与切量再平衡' : (c.dedicated ? '专属集群，最小保留台数锁定，不参与共享池' : '容量与需求匹配，无需变动');
+    ic.appendChild(el(`<div class="imp"><span class="badge b-none">不变</span><b>${c.name}</b> <span class="mono mut">${c.model} · ${(+c.mb.toFixed(2))}台 · ${W(c.rate)}/台</span><div class="impbody">${why}</div></div>`));
+    return;
+  }
+  if(c.role==='receive'){
+    let body;
+    if(c.gainers && c.gainers.length){
+      body = `<b>为承接 ${c.model} 客户抬高水位线</b>（少削峰、把三方的量切回自建）：<ul class="ben">`+
+        c.gainers.map(g=>`<li>${g.cust} <span class="mono">${W(g.wm_b)}→${W(g.wm_a)}</span> <span class="pos">+${W(g.d)}</span></li>`).join('')+`</ul>`;
+    } else {
+      body = `<b>${c.model} 产能向本集群（${W(c.rate)}/台，较高速率）集中</b>，替换同模型低速率集群的产能（该模型总容量随之缩减，属内部再分布）。`;
+    }
+    ic.appendChild(el(`<div class="imp"><span class="badge b-recv">接收 +${(+d.toFixed(2))}台</span><b>${c.name}</b> <span class="mono mut">${c.model} · ${W(c.rate)}/台</span><div class="impbody">${body}</div></div>`));
+  } else {
+    const why = c.dedicated
+      ? `<b>专属集群、当前无主客户闲置</b>：挪走超出最小保留(2台)的机器，机会成本≈0（把搁置的专属机变现给紧缺模型）。`
+      : `<b>共享池占用率仅 ${c.occ_b!=null?P(c.occ_b):'—'}、容量过剩</b>：挪走机器后本模型客户仍可承接`+
+        (c.losers && c.losers.length?`（个别小幅削峰，如 ${c.losers[0].cust} <span class="mono">${W(c.losers[0].wm_b)}→${W(c.losers[0].wm_a)}</span>）`:'')+`。`;
+    ic.appendChild(el(`<div class="imp"><span class="badge b-don">供出 ${(+d.toFixed(2))}台</span><b>${c.name}</b> <span class="mono mut">${c.model} · ${W(c.rate)}/台</span><div class="impbody">${why}</div></div>`));
+  }
+});
+root.appendChild(ic);
+
+/* ④ 模型级利用率 前/后 */
+root.appendChild(el(`<h2><span class="n">4</span>模型级利用率 & 自建承接量：再平衡前 / 后</h2>`));
+root.appendChild(el(`<div class="legend">
+ <span class="it"><span class="sw util-b"></span>再平衡前</span>
+ <span class="it"><span class="sw util-a"></span>再平衡后</span>
+ <span style="color:var(--mut)">利用率 = 峰值自建负载 / 自建容量</span></div>`));
+const mt=el(`<div class="card" style="overflow-x:auto"><table>
+ <thead><tr><th class="l">模型</th><th>客户峰值需求</th><th>自建容量 前→后</th>
+   <th>峰值自建承接 前→后</th><th style="min-width:150px">利用率 前/后<div style="font-weight:400;color:var(--mut)">峰值负载/总容量</div></th>
+   <th>共享池占用率 前→后<div style="font-weight:400;color:var(--mut)">Σ水位线/共享容量</div></th></tr></thead>
+ <tbody id="mb"></tbody></table></div>`);
+root.appendChild(mt);
+const mb=mt.querySelector('#mb');
+D.model_rows.forEach(m=>{
+  if(!m.participates){
+    mb.appendChild(el(`<tr style="opacity:.6">
+     <td class="l mono">${m.model}</td>
+     <td class="mono">${W(m.peak)}</td>
+     <td class="mono">${W(m.cap_b)} → ${W(m.cap_a)}</td>
+     <td class="l" colspan="3" style="color:var(--mut)">无三方额度，不参与切量再平衡（机器数不变）</td>
+    </tr>`));
+    return;
+  }
+  const up=m.util_a>=m.util_b;
+  const dl=(m.load_a-m.load_b);
+  const occB=m.occ_b!=null?P(m.occ_b):'—', occA=m.occ_a!=null?P(m.occ_a):'—';
+  const occFull=(m.occ_a!=null&&m.occ_a>=0.999);
+  mb.appendChild(el(`<tr>
+   <td class="l mono">${m.model}</td>
+   <td class="mono">${W(m.peak)}</td>
+   <td class="mono">${W(m.cap_b)} → ${W(m.cap_a)}</td>
+   <td class="mono">${W(m.load_b)} → ${W(m.load_a)} <span class="${dl>=0?'pos':'neg'}" style="font-size:10px">${dl>=0?'+':''}${W(dl)}</span></td>
+   <td><div class="dual">
+     <div class="row"><span class="k">前</span><span class="bar"><span class="util-b" style="width:${Math.min(m.util_b*100,100)}%"></span></span><span>${P(m.util_b)}</span></div>
+     <div class="row"><span class="k">后</span><span class="bar"><span class="util-a" style="width:${Math.min(m.util_a*100,100)}%"></span></span><span>${P(m.util_a)}</span></div>
+   </div></td>
+   <td class="mono">${occB} → <b class="${occFull?'pos':''}">${occA}</b>
+     <div style="font-size:10px;color:var(--mut)">${W(m.swm_a)}/${W(m.shared_a)}</div></td>
+  </tr>`));
+});
+root.appendChild(el(`<div class="note">两个「利用率」口径的区别很关键：<br>
+ · <b>利用率(峰值负载/总容量)</b>：偏保守——既吃了「各客户波峰不同时发生」的亏，又把<b>专属集群闲置产能</b>算进分母（如 glm-5.1 的 KSCC/XISHANJU 2000w 无主客户、普通客户够不到）。<br>
+ · <b>共享池占用率(Σ水位线/共享容量)</b>：真实反映自建被承诺了多少。<b>=100% 即共享池已吃满、还在削峰</b>（想接更多得加容量）；&lt;100% 才是真有余量。<br>
+ 关键读法：<b>glm-5.2</b> 再平衡前共享池占用仅 53%（容量过剩、真浪费）→ 机器抽走后升到 100%；<b>kimi-k2.5</b> 始终 100%（紧缺，扩容后自建承接 3500w→6000w，把三方的量切回来）；
+ <b>kimi-k2.6</b> 前 100% 且在削峰 → 加 1 台后降到 87%、不再削峰（见下方说明）。</div>`));
+
+root.appendChild(el(`<div class="card" style="border-left:3px solid var(--warn)">
+ <b>为什么给 kimi-k2.6 加机器？（容量看着够，其实在削峰）</b>
+ <div class="note" style="margin:6px 0 0">
+ 它的<b>峰值需求 922w</b> 是「各客户波峰叠加后的峰」，确实 &lt; 原容量 1200w。但水位线是<b>每客户一条平的上限</b>，要不削峰就得让预算盖住<b>各客户峰值之和 = 1310w</b>（客户波峰并不同时发生）。1200w &lt; 1310w，所以原本 BODHIMIND(756→750w)、珠海办公(516→435w) 等都被削峰、量外溢三方。<br>
+ 那台机器来自 <b>GLM-5.1-KSCC 闲置的第 3 台专属机（无主客户，机会成本≈0）</b>，挪到 kimi-k2.6 后容量 1200w→1500w、Σ水位线达到 1310w → 所有客户拿到全峰、不再削峰，净增 <b>+683 元/天</b>。等于把一台搁置的专属机变现。</div>
+</div>`));
+
+/* 累计收益曲线 */
+root.appendChild(el(`<h2><span class="n">5</span>逐台腾挪的累计自建收入（边际递减，正收益即止）</h2>`));
+(function(){
+  const SW=1000,SH=200,ML=70,MR=16,MT=14,MB=28,pw=SW-ML-MR,ph=SH-MT-MB;
+  const c=D.curve; if(!c.length){return;}
+  const xs=[D.base,...c.map(p=>p.cum)];
+  const y0=Math.min(...xs), y1=Math.max(...xs);
+  const pad=(y1-y0)*0.08||1;
+  const X=i=>ML+(i/(c.length))*pw, Y=v=>MT+ph-((v-(y0-pad))/((y1+pad)-(y0-pad)))*ph;
+  const pts=[{i:0,cum:D.base},...c.map((p,i)=>({i:i+1,cum:p.cum}))];
+  const path=pts.map((p,i)=>`${i?'L':'M'}${X(p.i)},${Y(p.cum)}`).join('');
+  const yt=[y0,(y0+y1)/2,y1];
+  const svg=el(`<div class="card"><svg viewBox="0 0 ${SW} ${SH}">
+   ${yt.map(v=>`<line x1="${ML}" y1="${Y(v)}" x2="${SW-MR}" y2="${Y(v)}" stroke="var(--line)"/>
+     <text class="ax" x="${ML-6}" y="${Y(v)+3}" text-anchor="end">${RMBw(v)}</text>`).join('')}
+   <path d="${path}" fill="none" stroke="var(--a)" stroke-width="2"/>
+   ${pts.filter((p,i)=>i%2===0||i===pts.length-1).map(p=>`<circle cx="${X(p.i)}" cy="${Y(p.cum)}" r="2.2" fill="var(--a)"/>`).join('')}
+   <text class="ax" x="${ML}" y="${SH-8}" text-anchor="start">起点(原策略)</text>
+   <text class="ax" x="${X(c.length)}" y="${SH-8}" text-anchor="end">第${c.length}台</text>
+   </svg>
+   <div class="note" style="margin:8px 0 0">纵轴=全模型自建总收入(元/天)。每加一台机器的边际收益递减，直到无正收益挪动（末步 +${RMB(c[c.length-1].gain)}/天）为止；全程每步都满足峰值可承接。</div>
+  </div>`);
+  root.appendChild(svg);
+})();
+
+/* ⑤ 峰值可行性 */
+root.appendChild(el(`<h2><span class="n">6</span>再平衡后逐模型峰值可行性（硬约束：自建+三方 ≥ 客户峰值）</h2>`));
+const pf=D.feasibility;
+let rows=Object.keys(pf).sort().map(m=>{const f=pf[m];
+  return `<tr><td class="l mono">${m}</td><td class="mono">${W(f.peak_demand)}</td><td class="mono">${W(f.self_cap)}</td>
+   <td class="mono">${W(f.vendor_cap)}</td><td class="mono">${W(f.total_cap)}</td>
+   <td class="mono ${f.slack>=0?'pos':'neg'}">${W(f.slack)}</td>
+   <td><span class="tag ${f.feasible?'up':'dn'}">${f.feasible?'OK':'掉量'}</span></td></tr>`;}).join('');
+root.appendChild(el(`<div class="card" style="overflow-x:auto"><table>
+ <thead><tr><th class="l">模型</th><th>客户峰值</th><th>自建(后)</th><th>三方额度</th><th>总承接</th><th>余量</th><th>判定</th></tr></thead>
+ <tbody>${rows}</tbody></table></div>`));
+
+root.appendChild(el(`<div class="foot">
+ 实验版 · <span class="mono">run_time_period_rebalance.py</span>（target-rate）→ <span class="mono">gen_rebalance_html.py</span>。
+ 单机吞吐按目标集群速率；机器总量守恒；每步腾挪均满足峰值可承接且整体收入净增；源集群机器减少后水位线自动更激进削峰（损失已计入净收益）。收益=元/天，按 2026-07-07 当日波形折算。
+</div>`));
+</script></body></html>
