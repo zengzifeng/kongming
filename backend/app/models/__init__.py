@@ -9,6 +9,7 @@ from .approval_log import ApprovalLog
 from .policy_run import PolicyRun, PolicyRunStatus
 from .policy import Policy, PolicyStatus
 from .policy_action import PolicyAction
+from .policy_audit_log import PolicyAuditLog, PolicyAuditAction
 from .metric_snapshot import MetricSnapshot, SnapshotPhase
 from .revenue_attribution import RevenueAttribution, RevenueMechanism
 from .revenue_analysis import PolicyRevenueAnalysis
@@ -17,8 +18,21 @@ from .customer_usage_hourly import CustomerUsageHourly
 from .customer_sell_discount import CustomerSellDiscount
 from .alert import Alert, AlertStatus, AlertSeverity
 from .job_log import JobLog
+from .job_schedule import JobSchedule, JobTriggerType
+from .monitor_batch import MonitorBatch, MonitorBatchStatus
+from .monitor_consumer import MonitorConsumer
+from .cluster_model_tpm import ClusterModelTpm
+from .consumer_model_tpm import ConsumerModelTpm
+from .gpu_node_count import GpuNodeCount
 from .vendor import VendorQuota, VendorStatus
 from .model_list_price import ModelListPrice
+from .fitting import (
+    FittingAlgorithm,
+    CustomerFittingConfig,
+    FittingResult,
+    WavePeriod,
+    FitLevel,
+)
 
 __all__ = [
     "BaseModel",
@@ -37,6 +51,8 @@ __all__ = [
     "Policy",
     "PolicyStatus",
     "PolicyAction",
+    "PolicyAuditLog",
+    "PolicyAuditAction",
     "MetricSnapshot",
     "SnapshotPhase",
     "RevenueAttribution",
@@ -49,7 +65,20 @@ __all__ = [
     "AlertStatus",
     "AlertSeverity",
     "JobLog",
+    "JobSchedule",
+    "JobTriggerType",
+    "MonitorBatch",
+    "MonitorBatchStatus",
+    "MonitorConsumer",
+    "ClusterModelTpm",
+    "ConsumerModelTpm",
+    "GpuNodeCount",
     "VendorQuota",
     "VendorStatus",
     "ModelListPrice",
+    "FittingAlgorithm",
+    "CustomerFittingConfig",
+    "FittingResult",
+    "WavePeriod",
+    "FitLevel",
 ]

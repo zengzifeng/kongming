@@ -110,7 +110,7 @@ def build_snapshot(
         # 策略运行前：按最新实跑负载实时计算各集群当前冗余，覆盖静态录入值。
         apply_current_redundancy(cluster_dicts)
 
-    return PolicyInputSnapshot(
+    snapshot = PolicyInputSnapshot(
         captured_at=utcnow(),
         algorithm=algorithm,
         demands=demand_items,
@@ -139,3 +139,62 @@ def build_snapshot(
         vendors=[asdict(v) for v in vendors],
         params=params,
     )
+    return snapshot
+
+
+def build_run_snapshot(
+    algorithm: str,
+    demand_ids: list[int] | None = None,
+    params: dict | None = None,
+) -> PolicyInputSnapshot:
+    """策略测算的统一输入构建：由「触发时是否给定 demand_ids」决定取数逻辑，
+    策略侧(policy_service)不再关心分路。
+
+    - 无 ``demand_ids``（默认/后台定时）：从实跑量 + 平台定价主数据实时构建，
+      并按最新负载富化各集群当前冗余。
+    - 有 ``demand_ids``（前端手动指定新增某客户需求评估）：按显式 id 从 demands 表取。
+    """
+    from ..models import Demand
+    from ..utils.errors import ValidationFailed
+    from .usage_demand_source import build_usage_demand_items
+    from ..extensions import db
+
+    params = dict(params or {})
+    if demand_ids:
+        demands = list(
+            db.session.execute(db.select(Demand).where(Demand.id.in_(demand_ids))).scalars()
+        )
+        if not demands:
+            raise ValidationFailed("指定的需求不存在或不可用")
+        return build_snapshot(algorithm=algorithm, demands=demands, params=params)
+
+    demand_items = build_usage_demand_items()
+    if not demand_items:
+        raise ValidationFailed("没有可用的实跑量需求用于测算")
+    _apply_fitted_series(demand_items)
+    return build_snapshot(
+        algorithm=algorithm,
+        demand_items=demand_items,
+        params=params,
+        enrich_cluster_redundancy=True,
+    )
+
+
+def _apply_fitted_series(demand_items) -> None:
+    """WAVE_FIT_ENABLED 时，用波形拟合结果覆盖各需求的 tpm_series（time_period 消费）。
+
+    每个 (客户, 模型) 取最新的 闲时+忙时 客户级拟合波形合并为整段序列；无拟合结果的项
+    保留 usage_demand_source 直接搬来的原始序列（回退，行为与关闭开关时一致）。
+    """
+    from flask import current_app
+
+    if not current_app.config.get("WAVE_FIT_ENABLED", False):
+        return
+    from ..services.wave_fitting_service import WaveFittingService
+
+    svc = WaveFittingService()
+    for item in demand_items:
+        fitted = svc.build_fitted_series(item.customer_code, item.model_name)
+        if fitted:
+            item.tpm_series = fitted
+            item.expected_tpm = max(tpm for _, tpm in fitted)  # 峰值基准同步为拟合序列峰值

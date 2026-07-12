@@ -1,0 +1,896 @@
+openapi: 3.0.3
+info:
+  title: 空明 Kongming - AI 网关运营平台 后端 API
+  version: "1.0.0"
+  description: |
+    空明后端对外暴露的 HTTP API。除健康检查（`/healthz`、`/readyz`）外，
+    所有业务接口统一前缀 `/api/v1`。
+
+    ## 统一响应包络
+    所有业务接口返回统一结构：
+    ```json
+    {
+      "data": <业务数据或 null>,
+      "message": "ok",
+      "request_id": "<本次请求追踪 ID>",
+      "errors": null
+    }
+    ```
+    出错时 `data=null`，`errors={"code": "<错误码>", "details": {...}}`。
+
+    ## 分页
+    列表接口用 query 参数 `page`（默认 1）、`page_size`（默认 20，最大 200）分页，
+    返回 `data={items, page, page_size, total}`。
+
+    ## 错误码
+    | HTTP | code | 含义 |
+    |------|------|------|
+    | 400 | VALIDATION_ERROR | 参数校验失败 |
+    | 404 | RESOURCE_NOT_FOUND | 资源不存在 |
+    | 405 | METHOD_NOT_ALLOWED | 方法不允许 |
+    | 409 | STATE_CONFLICT | 状态机冲突 |
+    | 502 | INTEGRATION_FAILED | 外部集成失败 |
+    | 500 | ALGORITHM_FAILED / INTERNAL_ERROR | 算法/内部错误 |
+
+servers:
+  - url: http://localhost:5001
+    description: 本地开发（run.py 默认端口 5001）
+
+tags:
+  - name: Health
+    description: 健康检查（无 /api/v1 前缀）
+  - name: Sync
+    description: 报备平台同步批次与原始报备单
+  - name: Demands
+    description: 需求单
+  - name: Evaluations
+    description: 需求评估与审批
+  - name: Policies
+    description: 策略测算、策略与采纳流转
+  - name: Revenues
+    description: 收益归因、分析、告警、客户用量
+  - name: Dashboards
+    description: 运营/客户/管理/资源看板与周月报
+  - name: Vendors
+    description: 三方供应额度
+  - name: Jobs
+    description: 定时任务配置
+  - name: Fittings
+    description: 波形拟合（算法目录、客户关联配置、跑拟合、波形结果）
+
+paths:
+  # ==================== Health ====================
+  /healthz:
+    get:
+      tags: [Health]
+      summary: 存活探针
+      responses:
+        "200":
+          description: 服务存活
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, example: ok }
+  /readyz:
+    get:
+      tags: [Health]
+      summary: 就绪探针（含 DB 连通性）
+      responses:
+        "200":
+          description: 就绪
+        "503":
+          description: 未就绪（数据库不可用）
+
+  # ==================== Sync ====================
+  /api/v1/sync-batches:
+    get:
+      tags: [Sync]
+      summary: 同步批次列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: status, in: query, schema: { type: string }, description: 批次状态过滤 }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/sync-batches/run:
+    post:
+      tags: [Sync]
+      summary: 手动触发一次报备平台同步
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 128, default: manual }
+      responses:
+        "202":
+          description: 已受理，返回批次
+          content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } }
+  /api/v1/sync-batches/{batch_id}:
+    get:
+      tags: [Sync]
+      summary: 批次详情
+      parameters:
+        - { name: batch_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/raw-filings:
+    get:
+      tags: [Sync]
+      summary: 原始报备单列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: batch_id, in: query, schema: { type: integer } }
+        - { name: report_id, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+
+  # ==================== Demands ====================
+  /api/v1/demands:
+    get:
+      tags: [Demands]
+      summary: 需求单列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: status, in: query, schema: { type: string } }
+        - { name: customer_id, in: query, schema: { type: integer } }
+        - { name: model, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/demands/{demand_id}:
+    get:
+      tags: [Demands]
+      summary: 需求详情（含最新评估）
+      parameters:
+        - { name: demand_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Demands]
+      summary: 更新需求单
+      parameters:
+        - { name: demand_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+                expected_start_at: { type: string, format: date-time }
+                expected_end_at: { type: string, format: date-time }
+                extra: { type: object }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  # ==================== Evaluations ====================
+  /api/v1/demands/{demand_id}/evaluate:
+    post:
+      tags: [Evaluations]
+      summary: 对需求发起评估
+      parameters:
+        - { name: demand_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force: { type: boolean, default: false, description: 强制重新评估 }
+      responses:
+        "201": { $ref: "#/components/responses/Ok" }
+  /api/v1/evaluations:
+    get:
+      tags: [Evaluations]
+      summary: 评估列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: status, in: query, schema: { type: string } }
+        - { name: recommendation, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/evaluations/{evaluation_id}:
+    get:
+      tags: [Evaluations]
+      summary: 评估详情
+      parameters:
+        - { name: evaluation_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/evaluations/{evaluation_id}/approve:
+    post:
+      tags: [Evaluations]
+      summary: 通过评估
+      parameters:
+        - { name: evaluation_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operator]
+              properties:
+                operator: { type: string, minLength: 1, maxLength: 64 }
+                comment: { type: string, maxLength: 1024 }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/evaluations/{evaluation_id}/reject:
+    post:
+      tags: [Evaluations]
+      summary: 驳回评估
+      parameters:
+        - { name: evaluation_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operator, reason]
+              properties:
+                operator: { type: string, minLength: 1, maxLength: 64 }
+                reason: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  # ==================== Policies ====================
+  /api/v1/policy-runs:
+    post:
+      tags: [Policies]
+      summary: 提交一次策略测算
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                algorithm: { type: string, default: realtime, description: "realtime / time_period" }
+                demand_ids: { type: array, items: { type: integer }, description: 指定需求评估（不传=实跑量全局测算） }
+                demand_id: { type: integer, description: 绑定产出策略到该需求 }
+                params: { type: object }
+      responses:
+        "202": { $ref: "#/components/responses/Ok" }
+    get:
+      tags: [Policies]
+      summary: 策略测算记录列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: status, in: query, schema: { type: string } }
+        - { name: algorithm, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/policy-runs/{run_id}:
+    get:
+      tags: [Policies]
+      summary: 测算记录详情
+      parameters:
+        - { name: run_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/policy-runs/{run_id}/snapshot:
+    get:
+      tags: [Policies]
+      summary: 测算输入快照（需求/资源/约束）
+      parameters:
+        - { name: run_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/policies:
+    get:
+      tags: [Policies]
+      summary: 策略列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: status, in: query, schema: { type: string } }
+        - { name: algorithm, in: query, schema: { type: string } }
+        - { name: policy_run_id, in: query, schema: { type: integer } }
+        - { name: exclude_status, in: query, schema: { type: string } }
+        - { name: demand_id, in: query, schema: { type: integer } }
+        - { name: has_demand, in: query, schema: { type: boolean }, description: "true=需求评估触发；false=人工/定时全局策略" }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/policies/{policy_id}:
+    get:
+      tags: [Policies]
+      summary: 策略详情（含调整动作）
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Policies]
+      summary: 编辑策略字段
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                operator: { type: string, default: system }
+                summary_json: { type: object }
+                constraints_json: { type: object }
+                expected_revenue_gain: { type: number }
+                expected_peak_shaving_gain: { type: number }
+                expected_off_peak_gain: { type: number }
+                effective_from: { type: string, format: date-time }
+                effective_to: { type: string, format: date-time }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/policies/{policy_id}/audit-logs:
+    get:
+      tags: [Policies]
+      summary: 策略审计日志
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/policies/{policy_id}/report:
+    get:
+      tags: [Policies]
+      summary: 时段策略结构化报告
+      description: 逐调整收益(元/天) + 单TPM收入示例 + 集群利用率/共享池占用率 + 模型级再平衡。
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/policies/{policy_id}/accept:
+    post:
+      tags: [Policies]
+      summary: 采纳策略
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operator]
+              properties:
+                operator: { type: string, minLength: 1, maxLength: 64 }
+                effective_from: { type: string, format: date-time }
+                comment: { type: string, maxLength: 1024 }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "409": { $ref: "#/components/responses/StateConflict" }
+  /api/v1/policies/{policy_id}/recalculate:
+    post:
+      tags: [Policies]
+      summary: 基于策略重新测算
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                operator: { type: string, default: system }
+                params: { type: object }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/policies/{policy_id}/cancel:
+    post:
+      tags: [Policies]
+      summary: 取消策略
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operator, reason]
+              properties:
+                operator: { type: string, minLength: 1, maxLength: 64 }
+                reason: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  # ==================== Revenues ====================
+  /api/v1/revenue/attributions:
+    get:
+      tags: [Revenues]
+      summary: 收益归因列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: policy_id, in: query, schema: { type: integer } }
+        - { name: mechanism, in: query, schema: { type: string } }
+        - { name: project_code, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/revenue/analysis:
+    get:
+      tags: [Revenues]
+      summary: 收益分析汇总
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/revenue/analysis/{policy_id}/archive:
+    post:
+      tags: [Revenues]
+      summary: 归档某策略的收益分析
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operator, reason]
+              properties:
+                operator: { type: string, minLength: 1, maxLength: 64 }
+                reason: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/revenue/policies/{policy_id}:
+    get:
+      tags: [Revenues]
+      summary: 某策略的收益全景（快照/归因/分析）
+      parameters:
+        - { name: policy_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/customers/{customer_id}/usage:
+    get:
+      tags: [Revenues]
+      summary: 客户用量（日聚合）
+      parameters:
+        - { name: customer_id, in: path, required: true, schema: { type: integer } }
+        - { name: granularity, in: query, schema: { type: string, default: day }, description: "V1 仅支持 day" }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/customer-demands/{report_id}/tracking:
+    get:
+      tags: [Revenues]
+      summary: 报备单履约追踪
+      parameters:
+        - { name: report_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/alerts:
+    get:
+      tags: [Revenues]
+      summary: 告警列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - { name: status, in: query, schema: { type: string } }
+        - { name: severity, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+  /api/v1/alerts/{alert_id}:
+    patch:
+      tags: [Revenues]
+      summary: 处理告警（确认/关闭）
+      parameters:
+        - { name: alert_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [ack, close] }
+                operator: { type: string, maxLength: 64 }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  # ==================== Dashboards ====================
+  /api/v1/dashboard/operations:
+    get:
+      tags: [Dashboards]
+      summary: 运营看板
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/dashboard/customers:
+    get:
+      tags: [Dashboards]
+      summary: 客户看板
+      parameters:
+        - { name: customer_id, in: query, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/dashboard/management:
+    get:
+      tags: [Dashboards]
+      summary: 管理看板
+      parameters:
+        - { name: range, in: query, schema: { type: string, default: 7d } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/dashboard/resources:
+    get:
+      tags: [Dashboards]
+      summary: 资源看板
+      parameters:
+        - { name: cluster_name, in: query, schema: { type: string } }
+        - { name: deployed_model, in: query, schema: { type: string } }
+        - { name: gpu_model, in: query, schema: { type: string } }
+        - { name: datacenter, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/dashboard/resources/clusters:
+    patch:
+      tags: [Dashboards]
+      summary: 更新集群单台承接能力/台数等
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cluster_name, deployed_model]
+              properties:
+                cluster_name: { type: string }
+                deployed_model: { type: string }
+                tpm_per_machine_w: { type: number, description: 单台承接能力（万 TPM） }
+                machine_count: { type: integer }
+                current_tpm_w: { type: number }
+                provider: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/reports/weekly:
+    get:
+      tags: [Dashboards]
+      summary: 周报
+      parameters:
+        - { name: week, in: query, schema: { type: string }, description: "如 2026-W28" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/reports/monthly:
+    get:
+      tags: [Dashboards]
+      summary: 月报
+      parameters:
+        - { name: month, in: query, schema: { type: string }, description: "如 2026-07" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  # ==================== Vendors ====================
+  /api/v1/vendors/quotas:
+    get:
+      tags: [Vendors]
+      summary: 三方供应额度列表
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - { name: page_size, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: vendor, in: query, schema: { type: string } }
+        - { name: model, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedOk" }
+
+  # ==================== Jobs ====================
+  /api/v1/jobs:
+    get:
+      tags: [Jobs]
+      summary: 定时任务配置列表
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/jobs/{job_name}:
+    get:
+      tags: [Jobs]
+      summary: 定时任务配置详情
+      parameters:
+        - { name: job_name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Jobs]
+      summary: 修改定时任务（cron/间隔/开关/参数）
+      parameters:
+        - { name: job_name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: { type: string, maxLength: 256 }
+                trigger_type: { type: string, enum: [cron, interval] }
+                cron_expr: { type: string, maxLength: 64, description: "5 段 crontab" }
+                interval_seconds: { type: integer, minimum: 1 }
+                enabled: { type: boolean }
+                args_json: { type: object }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  # ==================== Fittings ====================
+  /api/v1/fittings/algorithms:
+    get:
+      tags: [Fittings]
+      summary: 拟合算法目录（只读）
+      description: 有哪些算法可选管理在库，API 只读，不支持新增/修改。
+      responses:
+        "200":
+          description: 算法列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/FittingAlgorithm" }
+  /api/v1/fittings/configs:
+    get:
+      tags: [Fittings]
+      summary: 客户拟合关联配置列表
+      parameters:
+        - { name: customer_code, in: query, schema: { type: string } }
+        - { name: model_name, in: query, schema: { type: string } }
+        - { name: period, in: query, schema: { type: string, enum: [idle, busy] } }
+      responses:
+        "200":
+          description: 配置列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/CustomerFittingConfig" }
+    post:
+      tags: [Fittings]
+      summary: 新增/更新客户拟合配置（按 客户+模型+时段 自然键 upsert）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_code, model_name, period, algo_name]
+              properties:
+                customer_code: { type: string, minLength: 1, maxLength: 64 }
+                model_name: { type: string, minLength: 1, maxLength: 64 }
+                period: { type: string, enum: [idle, busy], description: "闲时/忙时" }
+                algo_name: { type: string, minLength: 1, maxLength: 64 }
+                params_json:
+                  type: object
+                  description: 人工配置的算法输入，如 {"delta_tpm": 增/减量}
+                  example: { delta_tpm: 5.0 }
+                enabled: { type: boolean, default: true }
+      responses:
+        "200":
+          description: upsert 后的配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/CustomerFittingConfig" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/fittings/configs/{config_id}:
+    get:
+      tags: [Fittings]
+      summary: 客户拟合配置详情
+      parameters:
+        - { name: config_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Fittings]
+      summary: 修改客户拟合配置
+      parameters:
+        - { name: config_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                period: { type: string, enum: [idle, busy] }
+                algo_name: { type: string, maxLength: 64 }
+                params_json: { type: object }
+                enabled: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/fittings/run:
+    post:
+      tags: [Fittings]
+      summary: 触发一次波形拟合
+      description: 遍历启用的客户配置产出客户级波形，再按模型叠加产出集群级波形，全部落库。
+      responses:
+        "200":
+          description: 本次拟合落库计数
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          generated_at: { type: string, format: date-time }
+                          customer_results: { type: integer }
+                          cluster_results: { type: integer }
+                          configs_seen: { type: integer }
+  /api/v1/fittings/results:
+    get:
+      tags: [Fittings]
+      summary: 拟合波形结果查询
+      parameters:
+        - { name: level, in: query, schema: { type: string, enum: [customer, cluster] } }
+        - { name: customer_code, in: query, schema: { type: string } }
+        - { name: model_name, in: query, schema: { type: string } }
+        - { name: period, in: query, schema: { type: string, enum: [idle, busy] } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200":
+          description: 波形结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/FittingResult" }
+                          total: { type: integer }
+
+components:
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, default: 1, minimum: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, default: 20, minimum: 1, maximum: 200 }
+
+  responses:
+    Ok:
+      description: 成功
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Envelope" }
+    PaginatedOk:
+      description: 分页成功
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Envelope"
+              - type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PageData" }
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ValidationError:
+      description: 参数校验失败
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    StateConflict:
+      description: 状态机冲突
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        data: { description: 业务数据，结构随接口而定 }
+        message: { type: string, example: ok }
+        request_id: { type: string, nullable: true }
+        errors: { type: object, nullable: true, example: null }
+    ErrorEnvelope:
+      type: object
+      properties:
+        data: { nullable: true, example: null }
+        message: { type: string, example: 资源不存在 }
+        request_id: { type: string, nullable: true }
+        errors:
+          type: object
+          properties:
+            code: { type: string, example: RESOURCE_NOT_FOUND }
+            details: { type: object }
+    PageData:
+      type: object
+      properties:
+        items: { type: array, items: { type: object } }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+    FittingAlgorithm:
+      type: object
+      description: 拟合算法目录条目（主数据，API 只读）
+      properties:
+        id: { type: integer }
+        algo_name: { type: string, example: demo }
+        display_name: { type: string, example: Demo 平移拟合 }
+        description: { type: string }
+        entry_ref: { type: string, description: registry 注册键, example: demo }
+        enabled: { type: boolean }
+        default_params: { type: object, example: { delta_tpm: 0.0 } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CustomerFittingConfig:
+      type: object
+      description: 客户+模型+时段 → 拟合算法 的关联配置
+      properties:
+        id: { type: integer }
+        customer_code: { type: string }
+        model_name: { type: string }
+        period: { type: string, enum: [idle, busy] }
+        algo_name: { type: string }
+        params_json: { type: object, example: { delta_tpm: 5.0 } }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    FittingResult:
+      type: object
+      description: 一次拟合产出的时段波形（客户级或集群级）
+      properties:
+        id: { type: integer }
+        level: { type: string, enum: [customer, cluster] }
+        customer_code: { type: string, nullable: true }
+        cluster_name: { type: string, nullable: true }
+        model_name: { type: string }
+        period: { type: string, enum: [idle, busy] }
+        algo_name: { type: string }
+        generated_at: { type: string, format: date-time }
+        series_json:
+          type: array
+          description: "[[timestamp_iso, tpm], ...] 目标时段波形序列"
+          items:
+            type: array
+            items: {}
+          example: [["2026-07-08T10:00:00", 20.0]]
+        meta_json: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }

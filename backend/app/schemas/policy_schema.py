@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 class PolicyRunCreate(BaseModel):
     algorithm: str = Field(default="realtime")
     demand_ids: list[int] | None = None
+    # 需求评估触发时传入，绑定产出策略到该 demand；不传=人工触发的全局策略。
+    demand_id: int | None = None
     params: dict | None = None
 
 
@@ -17,6 +19,7 @@ class PolicyAcceptRequest(BaseModel):
 
 
 class PolicyRecalculateRequest(BaseModel):
+    operator: str = Field(default="system", min_length=1, max_length=64)
     params: dict | None = None
 
 
@@ -26,6 +29,7 @@ class PolicyCancelRequest(BaseModel):
 
 
 class PolicyPatchRequest(BaseModel):
+    operator: str = Field(default="system", min_length=1, max_length=64)
     summary_json: dict | None = None
     constraints_json: dict | None = None
     expected_revenue_gain: float | None = None

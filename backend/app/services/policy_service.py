@@ -4,29 +4,30 @@ import hashlib
 import json
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
-
-from ..algorithms import build_snapshot, get_solver
+from ..algorithms import build_run_snapshot, get_solver
 from ..algorithms.base import PolicyInputSnapshot, PolicyResult
-from ..algorithms.usage_demand_source import build_usage_demand_items
 from ..extensions import db
 from ..models import (
     Demand,
     Policy,
     PolicyAction,
+    PolicyAuditAction,
+    PolicyAuditLog,
     PolicyRun,
     PolicyStatus,
 )
 from ..models.policy_run import PolicyRunStatus
-from ..utils.errors import AlgorithmError, NotFound, StateConflict, ValidationFailed
+from ..utils.errors import AlgorithmError, NotFound, StateConflict
 from ..utils.time import utcnow
 
 
 class PolicyService:
     def submit_run(self, algorithm: str, demand_ids: list[int] | None = None,
-                   params: dict | None = None, triggered_by: str = "manual") -> PolicyRun:
-        # 默认（无 demand_ids）：从实跑量 + 平台定价主数据实时构建需求。
-        # demand_ids 有值：手动/报备路径，从 demands 表按 id 取（前端指定新增客户需求评估时用）。
+                   params: dict | None = None, triggered_by: str = "manual",
+                   demand_id: int | None = None) -> PolicyRun:
+        # 输入取数分路（demand_ids vs 实跑量）已下沉到 algorithms.build_run_snapshot，
+        # 策略侧只负责：注入再平衡开关 → 建 snapshot → 落 run → 执行。
+        # demand_id：需求评估触发的策略归属，写入 Policy.demand_id；NULL=人工/定时触发的全局策略。
         # 注入模型级再平衡开关（solver 从 snapshot.params 读，避免 solver 依赖 Flask config）。
         from flask import current_app
 
@@ -35,19 +36,7 @@ class PolicyService:
             "enable_model_rebalance",
             current_app.config.get("MODEL_REBALANCE_ENABLED", True),
         )
-        if demand_ids:
-            demands = self._load_demands(demand_ids)
-            if not demands:
-                raise ValidationFailed("指定的需求不存在或不可用")
-            snapshot = build_snapshot(algorithm=algorithm, demands=demands, params=params)
-        else:
-            demand_items = build_usage_demand_items()
-            if not demand_items:
-                raise ValidationFailed("没有可用的实跑量需求用于测算")
-            snapshot = build_snapshot(
-                algorithm=algorithm, demand_items=demand_items, params=params,
-                enrich_cluster_redundancy=True,
-            )
+        snapshot = build_run_snapshot(algorithm=algorithm, demand_ids=demand_ids, params=params)
 
         snapshot_dict = snapshot.to_dict()
         input_hash = hashlib.sha256(
@@ -67,15 +56,10 @@ class PolicyService:
         db.session.add(run)
         db.session.flush()
 
-        self._execute(run, snapshot)
+        self._execute(run, snapshot, demand_id=demand_id)
         return run
 
-    def _load_demands(self, demand_ids: list[int]) -> list[Demand]:
-        # 手动/报备路径：仅按显式 id 取 demands 表（不再默认扫全表已审批需求）。
-        stmt = select(Demand).where(Demand.id.in_(demand_ids))
-        return list(db.session.execute(stmt).scalars())
-
-    def _execute(self, run: PolicyRun, snapshot: PolicyInputSnapshot):
+    def _execute(self, run: PolicyRun, snapshot: PolicyInputSnapshot, demand_id: int | None = None):
         solver = get_solver(snapshot.algorithm)
         run.status = PolicyRunStatus.RUNNING
         run.started_at = utcnow()
@@ -97,17 +81,18 @@ class PolicyService:
             db.session.flush()
             raise
 
-        self._persist_policy(run, result)
+        self._persist_policy(run, result, demand_id=demand_id)
         run.status = PolicyRunStatus.SUCCESS
         run.finished_at = utcnow()
         run.duration_ms = int(
             (run.finished_at - run.started_at).total_seconds() * 1000)
         db.session.flush()
 
-    def _persist_policy(self, run: PolicyRun, result: PolicyResult):
+    def _persist_policy(self, run: PolicyRun, result: PolicyResult, demand_id: int | None = None):
         now = utcnow()
         policy = Policy(
             policy_run_id=run.id,
+            demand_id=demand_id,
             policy_no="P" + now.strftime("%Y%m%d%H%M%S%f")[:-3],
             algorithm=run.algorithm,
             summary_json=result.summary,
@@ -141,10 +126,11 @@ class PolicyService:
             raise NotFound("策略不存在", details={"id": policy_id})
         return policy
 
-    def patch(self, policy_id: int, patch: dict) -> Policy:
+    def patch(self, policy_id: int, patch: dict, operator: str = "system") -> Policy:
         policy = self.get_policy(policy_id)
-        if policy.status in (PolicyStatus.CANCELLED, PolicyStatus.EXPIRED):
-            raise StateConflict("策略状态不可修改", details={"status": policy.status})
+        # 仅 DRAFT 可改：已采纳/已取消的策略不允许静默改数（避免生效策略被无痕修改）。
+        if policy.status != PolicyStatus.DRAFT:
+            raise StateConflict("仅草稿状态策略可修改", details={"status": policy.status})
         allowed = {
             "summary_json",
             "constraints_json",
@@ -154,9 +140,15 @@ class PolicyService:
             "effective_from",
             "effective_to",
         }
+        before = {}
+        after = {}
         for key, value in patch.items():
             if key in allowed:
+                before[key] = self._jsonable(getattr(policy, key))
                 setattr(policy, key, value)
+                after[key] = self._jsonable(value)
+        self._audit(policy.id, PolicyAuditAction.PATCH, operator,
+                    before_json=before, after_json=after)
         db.session.flush()
         return policy
 
@@ -165,37 +157,68 @@ class PolicyService:
         policy = self.get_policy(policy_id)
         if policy.status != PolicyStatus.DRAFT:
             raise StateConflict("策略状态不可采纳", details={"status": policy.status})
+        before = {"status": policy.status}
         policy.status = PolicyStatus.ACCEPTED
         policy.accepted_by = operator
         policy.accepted_at = utcnow()
         policy.effective_from = effective_from or utcnow()
         policy.effective_to = policy.effective_from + timedelta(hours=2)
+        self._audit(policy.id, PolicyAuditAction.ACCEPT, operator, comment=comment,
+                    before_json=before,
+                    after_json={"status": policy.status,
+                                "effective_from": self._jsonable(policy.effective_from)})
         db.session.flush()
 
         from .revenue_service import RevenueService
         RevenueService().schedule_before_snapshot(policy)
         return policy
 
-    def recalculate(self, policy_id: int, params: dict | None = None) -> PolicyRun:
+    def recalculate(self, policy_id: int, params: dict | None = None,
+                    operator: str = "system") -> PolicyRun:
+        # 重算 = 用同一批需求重新取数跑一次，生成新的 run + DRAFT 策略。
+        # 旧策略保持原状（DRAFT 不变），是否取消由人工另行触发。
         policy = self.get_policy(policy_id)
-        if policy.status not in (PolicyStatus.DRAFT, PolicyStatus.RECALCULATING):
-            raise StateConflict("策略状态不可重算", details={"status": policy.status})
-        policy.status = PolicyStatus.RECALCULATING
-        db.session.flush()
+        if policy.status != PolicyStatus.DRAFT:
+            raise StateConflict("仅草稿状态策略可重算", details={"status": policy.status})
         old_run = db.session.get(PolicyRun, policy.policy_run_id)
         demand_ids = self._demand_ids_from_snapshot(
             old_run.input_snapshot_json or {})
-        return self.submit_run(policy.algorithm, demand_ids=demand_ids, params=params,
-                               triggered_by="recalculate")
+        run = self.submit_run(policy.algorithm, demand_ids=demand_ids, params=params,
+                              triggered_by="recalculate", demand_id=policy.demand_id)
+        self._audit(policy.id, PolicyAuditAction.RECALCULATE, operator,
+                    after_json={"new_run_id": run.id, "new_run_no": run.run_no})
+        db.session.flush()
+        return run
 
     def cancel(self, policy_id: int, operator: str, reason: str) -> Policy:
         policy = self.get_policy(policy_id)
-        if policy.status in (PolicyStatus.CANCELLED, PolicyStatus.EXPIRED):
-            raise StateConflict("策略已结束", details={"status": policy.status})
+        if policy.status == PolicyStatus.CANCELLED:
+            raise StateConflict("策略已取消", details={"status": policy.status})
+        before = {"status": policy.status}
         policy.status = PolicyStatus.CANCELLED
         policy.cancel_reason = reason
+        self._audit(policy.id, PolicyAuditAction.CANCEL, operator, comment=reason,
+                    before_json=before, after_json={"status": policy.status})
         db.session.flush()
         return policy
+
+    def _audit(self, policy_id: int, action: str, operator: str, *,
+               comment: str | None = None, before_json: dict | None = None,
+               after_json: dict | None = None) -> None:
+        db.session.add(PolicyAuditLog(
+            policy_id=policy_id,
+            action=action,
+            operator=operator or "system",
+            comment=comment,
+            before_json=before_json or {},
+            after_json=after_json or {},
+        ))
+
+    @staticmethod
+    def _jsonable(value):
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return value
 
     @staticmethod
     def _demand_ids_from_snapshot(snapshot_dict: dict) -> list[int]:

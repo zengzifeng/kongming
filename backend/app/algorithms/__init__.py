@@ -9,7 +9,7 @@ from .base import (
     PolicyResult,
     Solver,
 )
-from .snapshot import build_snapshot
+from .snapshot import build_snapshot, build_run_snapshot
 from .realtime_solver import RealtimeSolver
 from .time_period_solver import TimePeriodSolver
 
@@ -35,6 +35,7 @@ __all__ = [
     "PolicyResult",
     "Solver",
     "build_snapshot",
+    "build_run_snapshot",
     "get_solver",
     "RealtimeSolver",
     "TimePeriodSolver",

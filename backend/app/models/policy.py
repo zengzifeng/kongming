@@ -9,14 +9,14 @@ class PolicyStatus:
     DRAFT = "draft"
     ACCEPTED = "accepted"
     CANCELLED = "cancelled"
-    RECALCULATING = "recalculating"
-    EXPIRED = "expired"
 
 
 class Policy(BaseModel):
     __tablename__ = "policies"
 
     policy_run_id: Mapped[int] = mapped_column(ForeignKey("policy_runs.id"), nullable=False, index=True)
+    # 需求评估触发的策略绑定其 demand；NULL 表示人工/定时触发的全局策略，与单一客户需求无关。
+    demand_id: Mapped[int | None] = mapped_column(ForeignKey("demands.id"), nullable=True, index=True)
     policy_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     algorithm: Mapped[str] = mapped_column(String(32), default="realtime")
     summary_json: Mapped[dict] = mapped_column(JSON, default=dict)

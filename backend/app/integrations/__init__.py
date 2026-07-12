@@ -5,6 +5,7 @@ from .crm_client import CRMClient
 from .resource_client import ResourceClient
 from .billing_client import BillingClient
 from .monitoring_client import MonitoringClient
+from .resource_monitor_client import ResourceMonitorClient, parse_envelope
 from .vendor_client import VendorClient
 
 
@@ -35,6 +36,14 @@ def vendor_client() -> VendorClient:
     return VendorClient(mode=current_app.config["VENDOR_CLIENT_MODE"])
 
 
+def resource_monitor_client() -> ResourceMonitorClient:
+    return ResourceMonitorClient(
+        mode=current_app.config["RESOURCE_MONITOR_MODE"],
+        base_url=current_app.config["RESOURCE_MONITOR_BASE_URL"],
+        timeout=current_app.config.get("RESOURCE_MONITOR_TIMEOUT", 30),
+    )
+
+
 __all__ = [
     "filing_client",
     "crm_client",
@@ -42,10 +51,13 @@ __all__ = [
     "billing_client",
     "monitoring_client",
     "vendor_client",
+    "resource_monitor_client",
     "FilingPlatformClient",
     "CRMClient",
     "ResourceClient",
     "BillingClient",
     "MonitoringClient",
     "VendorClient",
+    "ResourceMonitorClient",
+    "parse_envelope",
 ]

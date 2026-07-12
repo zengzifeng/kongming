@@ -5,6 +5,11 @@ from .policy_repository import PolicyRepository, PolicyRunRepository
 from .revenue_repository import RevenueAttributionRepository, CustomerUsageRepository
 from .metric_repository import MetricSnapshotRepository
 from .alert_repository import AlertRepository
+from .fitting_repository import (
+    FittingAlgorithmRepository,
+    CustomerFittingConfigRepository,
+    FittingResultRepository,
+)
 
 __all__ = [
     "BaseRepository",
@@ -16,4 +21,7 @@ __all__ = [
     "CustomerUsageRepository",
     "MetricSnapshotRepository",
     "AlertRepository",
+    "FittingAlgorithmRepository",
+    "CustomerFittingConfigRepository",
+    "FittingResultRepository",
 ]

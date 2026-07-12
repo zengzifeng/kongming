@@ -22,6 +22,14 @@ def create_app(config_name: str = "dev") -> Flask:
     with app.app_context():
         extensions.db.create_all()
 
+    # 定时任务配置 seed（幂等）：即使调度线程未启用，前端仍可通过 /api/v1/jobs 管理。
+    from .jobs.scheduler import ensure_default_schedules
+    ensure_default_schedules(app)
+
+    # 拟合算法目录 seed（幂等）：有哪些算法可选管理在库，API 只读。
+    from .services.wave_fitting_service import ensure_default_fitting_algorithms
+    ensure_default_fitting_algorithms(app)
+
     if app.config.get("SCHEDULER_ENABLED") and not app.config.get("TESTING"):
         from .jobs.scheduler import start_scheduler
         start_scheduler(app)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from flask import Blueprint, request
 
 from ..extensions import db
+from ..models import PolicyAuditLog
 from ..repositories import PolicyRepository, PolicyRunRepository
 from ..schemas.common import model_to_dict
 from ..schemas.policy_schema import (
@@ -30,6 +31,7 @@ def create_policy_run():
         demand_ids=payload.demand_ids,
         params=payload.params,
         triggered_by="manual",
+        demand_id=payload.demand_id,
     )
     db.session.commit()
     return success(model_to_dict(run, exclude={"input_snapshot_json"}), status=202)
@@ -76,9 +78,16 @@ def list_policies():
     algorithm = request.args.get("algorithm")
     policy_run_id = request.args.get("policy_run_id", type=int)
     exclude_status = request.args.get("exclude_status")
+    demand_id = request.args.get("demand_id", type=int)
+    # has_demand=true 仅需求评估触发的策略；false 仅人工/定时触发的全局策略。
+    has_demand_arg = request.args.get("has_demand")
+    has_demand = None
+    if has_demand_arg is not None:
+        has_demand = has_demand_arg.lower() in ("1", "true", "yes")
     items, total = PolicyRepository().list(
         status=status, algorithm=algorithm, policy_run_id=policy_run_id,
-        exclude_status=exclude_status, page=page, page_size=page_size,
+        exclude_status=exclude_status, demand_id=demand_id, has_demand=has_demand,
+        page=page, page_size=page_size,
     )
     return paginated([model_to_dict(p) for p in items], page, page_size, total)
 
@@ -93,6 +102,17 @@ def get_policy(policy_id: int):
     })
 
 
+@bp.get("/policies/<int:policy_id>/audit-logs")
+def list_policy_audit_logs(policy_id: int):
+    PolicyService().get_policy(policy_id)  # 404 if missing
+    logs = db.session.execute(
+        db.select(PolicyAuditLog)
+        .where(PolicyAuditLog.policy_id == policy_id)
+        .order_by(PolicyAuditLog.id.desc())
+    ).scalars().all()
+    return success([model_to_dict(x) for x in logs])
+
+
 @bp.get("/policies/<int:policy_id>/report")
 def get_policy_report(policy_id: int):
     """时段策略结构化报告：逐调整收益(元/天) + 单TPM收入示例 + 集群利用率/共享池占用率 + 模型级再平衡。"""
@@ -102,7 +122,9 @@ def get_policy_report(policy_id: int):
 @bp.patch("/policies/<int:policy_id>")
 def patch_policy(policy_id: int):
     payload = PolicyPatchRequest(**(request.get_json(silent=True) or {}))
-    policy = PolicyService().patch(policy_id, payload.model_dump(exclude_unset=True))
+    fields = payload.model_dump(exclude_unset=True)
+    operator = fields.pop("operator", "system")
+    policy = PolicyService().patch(policy_id, fields, operator=operator)
     db.session.commit()
     return success(model_to_dict(policy))
 
@@ -122,7 +144,7 @@ def accept_policy(policy_id: int):
 @bp.post("/policies/<int:policy_id>/recalculate")
 def recalculate_policy(policy_id: int):
     payload = PolicyRecalculateRequest(**(request.get_json(silent=True) or {}))
-    run = PolicyService().recalculate(policy_id, params=payload.params)
+    run = PolicyService().recalculate(policy_id, params=payload.params, operator=payload.operator)
     db.session.commit()
     return success(model_to_dict(run, exclude={"input_snapshot_json"}))
 

@@ -37,6 +37,9 @@ NEW_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "cluster_resources": [
         ("current_redundant_machines", "INTEGER NOT NULL DEFAULT 0"),
     ],
+    "policies": [
+        ("demand_id", "INTEGER"),
+    ],
 }
 
 

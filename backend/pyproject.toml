@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.6",
     "python-dateutil>=2.9",
     "structlog>=24.1",
+    "flask-swagger-ui>=4.11",
 ]
 
 [project.optional-dependencies]

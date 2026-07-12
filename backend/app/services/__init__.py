@@ -9,6 +9,9 @@ from .dashboard_service import DashboardService
 from .report_service import ReportService
 from .policy_report_service import PolicyReportService
 from .alert_service import AlertService
+from .job_schedule_service import JobScheduleService
+from .resource_monitor_service import ResourceMonitorService
+from .wave_fitting_service import WaveFittingService
 
 __all__ = [
     "SyncService",
@@ -22,4 +25,7 @@ __all__ = [
     "ReportService",
     "PolicyReportService",
     "AlertService",
+    "JobScheduleService",
+    "ResourceMonitorService",
+    "WaveFittingService",
 ]

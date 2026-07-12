@@ -26,6 +26,14 @@ class BaseConfig:
     MONITORING_CLIENT_MODE = os.environ.get("MONITORING_CLIENT_MODE", "mock")
     VENDOR_CLIENT_MODE = os.environ.get("VENDOR_CLIENT_MODE", "mock")
 
+    # ---- 资源模型监控数据接口（winlink kingress）----
+    RESOURCE_MONITOR_MODE = os.environ.get("RESOURCE_MONITOR_MODE", "mock")  # mock | http
+    RESOURCE_MONITOR_BASE_URL = os.environ.get(
+        "RESOURCE_MONITOR_BASE_URL",
+        "http://winlink.sre.ksyun.com/ksp_service/api/v1/kingress/resource-model-monitor-data/list",
+    )
+    RESOURCE_MONITOR_TIMEOUT = int(os.environ.get("RESOURCE_MONITOR_TIMEOUT", "30"))
+
     POLICY_SNAPSHOT_RETENTION_DAYS = 180
     ALERT_THRESHOLD_LOW = 0.7
     ALERT_THRESHOLD_HIGH = 1.5
@@ -42,6 +50,17 @@ class BaseConfig:
     # 模型级供需再平衡：跨模型把富余机器挪给紧缺模型（仅满足峰值可承接 + 正收益 + 一台只搬一次）
     MODEL_REBALANCE_ENABLED = os.environ.get("KONGMING_MODEL_REBALANCE", "1") == "1"
 
+    # ---- 波形拟合(wave fitting)口径 ----
+    # 忙时小时区间（0-23 整点，闭区间集合）；闲时 = 24 小时补集。所有客户共用此全局边界。
+    WAVE_FIT_BUSY_HOURS = tuple(
+        int(h) for h in os.environ.get(
+            "KONGMING_WAVE_FIT_BUSY_HOURS",
+            "9,10,11,12,13,14,15,16,17,18,19,20,21",
+        ).split(",") if h != ""
+    )
+    # 是否用拟合波形覆盖 time_period 求解输入的 tpm_series（关闭时退化为直接搬原始序列）
+    WAVE_FIT_ENABLED = os.environ.get("KONGMING_WAVE_FIT_ENABLED", "1") == "1"
+
 
 class DevConfig(BaseConfig):
     DEBUG = True
@@ -55,6 +74,10 @@ class TestConfig(BaseConfig):
     SELF_PROVIDER_WHITELIST_ENABLED = False
     EXCLUDE_CUSTOMER_CODES = ()
     MODEL_REBALANCE_ENABLED = False
+    # 拟合接入求解默认关闭，既有 time_period 用例仍消费原始 tpm_series，不受扰动。
+    WAVE_FIT_ENABLED = False
+    # 监控接口固定走 mock，避免测试触网。
+    RESOURCE_MONITOR_MODE = "mock"
 
 
 class ProdConfig(BaseConfig):
