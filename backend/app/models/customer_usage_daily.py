@@ -12,7 +12,7 @@ class CustomerUsageDaily(BaseModel):
         Index("ix_usage_customer_date", "customer_id", "stat_date"),
     )
 
-    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("monitor_consumers.id"), nullable=False)
     report_id: Mapped[str] = mapped_column(String(64), nullable=False)
     stat_date: Mapped[date] = mapped_column(nullable=False)
     expected_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)

@@ -2,7 +2,7 @@
 from datetime import date, datetime
 
 from app.extensions import db
-from app.models import ClusterResource, Customer, CustomerUsageHourly
+from app.models import ClusterResource, MonitorConsumer, CustomerUsageHourly
 
 
 def _usage(cust_id, model, dt, io):
@@ -17,7 +17,7 @@ def _usage(cust_id, model, dt, io):
 
 
 def _seed_usage(app):
-    cust = Customer(customer_code="C0200", name="客户A", level="B")
+    cust = MonitorConsumer(ai_consumer="客户A", customer_code="C0200", customer_name="客户A", level="B")
     db.session.add(cust)
     db.session.flush()
     # 忙时点（10 点，io=1200 -> tpm 20）与闲时点（3 点，io=600 -> tpm 10）

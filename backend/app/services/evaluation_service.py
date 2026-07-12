@@ -4,7 +4,7 @@ from ..extensions import db
 from ..integrations import crm_client, resource_client
 from ..models import (
     ApprovalLog,
-    Customer,
+    MonitorConsumer,
     Demand,
     DemandStatus,
     Evaluation,
@@ -152,7 +152,7 @@ class EvaluationService:
         return round(feasibility, 4)
 
     def _customer_value(self, demand: Demand) -> float:
-        customer = db.session.get(Customer, demand.customer_id) if demand.customer_id else None
+        customer = db.session.get(MonitorConsumer, demand.customer_id) if demand.customer_id else None
         if not customer:
             return 0.5
         profile = crm_client().profile(customer.customer_code)

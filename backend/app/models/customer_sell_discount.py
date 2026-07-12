@@ -23,7 +23,7 @@ class CustomerSellDiscount(BaseModel):
         Index("ix_sell_discount_model", "model_name"),
     )
 
-    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("monitor_consumers.id"), nullable=False)
     customer_name: Mapped[str] = mapped_column(String(128), nullable=False)  # 冗余客户名，便于追溯
     model_name: Mapped[str] = mapped_column(String(64), nullable=False)      # 模型名称
     sell_discount: Mapped[float] = mapped_column(Numeric(6, 4), default=0)   # 售卖折扣

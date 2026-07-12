@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..algorithms._shared import SolverEconomicsMixin
 from ..algorithms.base import DemandSnapshotItem
 from ..extensions import db
-from ..models import Customer, Policy, PolicyRun
+from ..models import MonitorConsumer, Policy, PolicyRun
 from ..utils.errors import NotFound
 
 # 收入/收益为「TPM·整点」积分口径；× 60min ÷ 1e6(列表价元/百万token) = 元/天，
@@ -39,8 +39,8 @@ class PolicyReportService:
         params = snap.get("params", {}) or {}
         vendors = snap.get("vendors", []) or []
         model_prices = params.get("model_prices", {}) or {}
-        name_by_code = {c.customer_code: c.name
-                        for c in db.session.execute(db.select(Customer)).scalars()}
+        name_by_code = {c.customer_code: c.customer_name
+                        for c in db.session.execute(db.select(MonitorConsumer)).scalars()}
         dem_by_key = {(d["customer_code"], d["model_name"]): d for d in demands}
         econ = _Econ()
 

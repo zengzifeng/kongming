@@ -5,39 +5,54 @@ import { PageHeader } from '../../components/PageHeader';
 import { StatusTag } from '../../components/StatusTag';
 import { JsonBlock } from '../../components/JsonBlock';
 import { EmptyState } from '../../components/EmptyState';
-import { policiesApi } from '../../api/kongming';
-import type { Policy, PolicyDetail } from '../../api/types';
+import { dashboardsApi, fittingsApi, policiesApi, revenueApi, watchedClustersApi } from '../../api/kongming';
+
+import type { FittingResult, Policy, PolicyDetail, ResourceCluster, RevenueAnalysisItem } from '../../api/types';
+
 import { useAsync } from '../../hooks/useAsync';
 import { dateText, money, numberText } from '../../utils/format';
 import { parseJsonObject } from '../../utils/json';
+import { isWatchedCluster, watchedClusterNames } from '../../utils/watchedClusters';
 
-const fittingMock = [
-  { time: '00:00', night: 210, nightFit: 230, day: 0, dayFit: 0, redundant: 520 },
-  { time: '03:00', night: 180, nightFit: 205, day: 0, dayFit: 0, redundant: 610 },
-  { time: '06:00', night: 260, nightFit: 250, day: 0, dayFit: 0, redundant: 480 },
-  { time: '09:00', night: 0, nightFit: 0, day: 620, dayFit: 600, redundant: 260 },
-  { time: '12:00', night: 0, nightFit: 0, day: 780, dayFit: 740, redundant: 170 },
-  { time: '15:00', night: 0, nightFit: 0, day: 700, dayFit: 720, redundant: 210 },
-  { time: '18:00', night: 0, nightFit: 0, day: 540, dayFit: 560, redundant: 330 },
-];
 
-const revenueTrend = [
-  { day: 'D-6', expected: 1100, actual: 980, gap: -120 },
-  { day: 'D-5', expected: 1600, actual: 1520, gap: -80 },
-  { day: 'D-4', expected: 2100, actual: 2250, gap: 150 },
-  { day: 'D-3', expected: 2500, actual: 2360, gap: -140 },
-  { day: 'D-2', expected: 3100, actual: 2980, gap: -120 },
-  { day: 'D-1', expected: 3600, actual: 3720, gap: 120 },
-  { day: '今日', expected: 4200, actual: 4050, gap: -150 },
-];
+function timeLabel(value?: string) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 
-const clusterPlans = [
-  { cluster: 'Cluster-A', customer: '客户 1024', move: '夜间批量任务迁入', watermark: '65%', redundant: 610 },
-  { cluster: 'Cluster-B', customer: '客户 2048', move: '白天推理限流后腾挪', watermark: '72%', redundant: 480 },
-  { cluster: 'Cluster-C', customer: '客户 3072', move: '闲时补偿三方溢出量', watermark: '68%', redundant: 520 },
-];
+function addFittingSeries(rows: Record<string, string | number>[], results: FittingResult[], key: string) {
+  results.forEach((result) => {
+    (result.series_json || []).forEach(([ts, value], index) => {
+      const row = rows[index] || { time: timeLabel(ts) };
+      row[key] = Number(row[key] || 0) + Number(value || 0);
+      rows[index] = row;
+    });
+  });
+}
+
+function clusterPlanFromResource(cluster: ResourceCluster) {
+  return {
+    cluster: cluster.cluster_name,
+    customer: cluster.primary_customer || '-',
+    move: cluster.deployed_model,
+    watermark: `${Math.round(Number(cluster.cluster_utilization || 0) * 100)}%`,
+    redundant: Number(cluster.idle_redundant_tpm ?? cluster.current_redundant_tpm ?? 0),
+  };
+}
+
+function revenueRows(items: RevenueAnalysisItem[], policies: Policy[]) {
+  const allowed = new Set(policies.map((item) => item.id));
+  return items.filter((item) => allowed.has(item.policy_id)).slice(-7).map((item) => ({
+    day: item.policy_no,
+    expected: Number(item.expected_revenue_gain || 0),
+    actual: Number(item.actual_revenue_gain || 0),
+    gap: Number(item.revenue_gap || 0),
+  }));
+}
 
 function pickPolicies(policies: Policy[], key: string) {
+
   return policies.filter((item) => item.algorithm === key || JSON.stringify(item.summary_json || {}).includes(key));
 }
 
@@ -48,10 +63,30 @@ export function OffPeakDashboard() {
   const [editOpen, setEditOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
+  const resources = useAsync(() => dashboardsApi.resources({}), []);
+  const idleFits = useAsync(() => fittingsApi.results({ level: 'cluster', period: 'idle', page_size: 100 }), []);
+  const busyFits = useAsync(() => fittingsApi.results({ level: 'cluster', period: 'busy', page_size: 100 }), []);
+  const revenue = useAsync(() => revenueApi.analysis(), []);
+  const watchedClusters = useAsync(() => watchedClustersApi.list(), []);
+  const watchedNames = watchedClusterNames(watchedClusters.data);
+  const resourceClusters = (resources.data?.clusters || []).filter((cluster) => isWatchedCluster(cluster.cluster_name, watchedNames));
+  const idleFitItems = (idleFits.data?.items || []).filter((item) => isWatchedCluster(item.cluster_name, watchedNames));
+  const busyFitItems = (busyFits.data?.items || []).filter((item) => isWatchedCluster(item.cluster_name, watchedNames));
   const offPeakPolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'off_peak'), [policies.data?.items]);
+
   const totalGain = offPeakPolicies.reduce((sum, item) => sum + Number(item.expected_off_peak_gain || item.expected_revenue_gain || 0), 0);
+  const fittingRows = useMemo(() => {
+    const rows: Record<string, string | number>[] = [];
+    addFittingSeries(rows, idleFitItems, 'nightFit');
+    addFittingSeries(rows, busyFitItems, 'dayFit');
+    return rows.map((row) => ({ ...row, night: row.nightFit || 0, day: row.dayFit || 0, redundant: resourceClusters.reduce((sum, cluster) => sum + Number(cluster.current_redundant_tpm || 0), 0) }));
+  }, [idleFitItems, busyFitItems, resourceClusters]);
+  const clusterPlans = resourceClusters.map(clusterPlanFromResource).slice(0, 6);
+
+  const revenueTrend = revenueRows(revenue.data?.items || [], offPeakPolicies);
 
   async function createRun() {
+
     setSubmitting(true);
     try {
       await policiesApi.createRun({ algorithm: 'off_peak', params: { template: '闲忙时策略' } });
@@ -106,13 +141,16 @@ export function OffPeakDashboard() {
   return (
     <>
       <PageHeader eyebrow="Off Peak" title="闲忙时看板" description="根据前一天或固定时长拟合夜间、白天跑量，评估叠加新增需求后的资源冗余与收益。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成闲忙时策略</Button>} />
-      <Spin spinning={policies.loading}>
+      <Spin spinning={policies.loading || resources.loading || idleFits.loading || busyFits.loading || revenue.loading || watchedClusters.loading}>
+
+
         <div className="wire-grid page-section">
           <section className="wire-card dashboard-panel-wide">
             <div className="wire-card-title">集群维度夜间跑量/白天跑量拟合</div>
             <div className="resource-chart tall-chart">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={fittingMock}>
+                <LineChart data={fittingRows}>
+
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="time" />
                   <YAxis />

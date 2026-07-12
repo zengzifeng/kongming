@@ -26,7 +26,7 @@ from app import create_app  # noqa: E402
 from app.extensions import db  # noqa: E402
 from app.utils.model_name import normalize_model_name  # noqa: E402
 from app.models import (  # noqa: E402
-    Customer,
+    MonitorConsumer,
     ClusterResource,
     VendorQuota,
     ModelListPrice,
@@ -64,7 +64,7 @@ def read_sheet(wb, name):
 
 def clear_mock_customers():
     """删除 3 个 mock 客户及其依赖明细（已确认全部为 mock）。"""
-    mock = Customer.query.filter(Customer.customer_code.in_(MOCK_CUSTOMER_CODES)).all()
+    mock = MonitorConsumer.query.filter(MonitorConsumer.customer_code.in_(MOCK_CUSTOMER_CODES)).all()
     ids = [c.id for c in mock]
     if not ids:
         print("[mock] 无 mock 客户可清理")
@@ -141,7 +141,7 @@ def ingest_list_prices(wb):
 
 def ingest_sell_discounts(wb):
     CustomerSellDiscount.query.delete()
-    name_to_id = {c.name: c.id for c in Customer.query.all()}
+    name_to_id = {c.customer_name: c.id for c in MonitorConsumer.query.all()}
     rows = read_sheet(wb, "售卖")
     written, missing = 0, []
     for r in rows:
@@ -180,7 +180,7 @@ def main():
             ("vendor_quotas", VendorQuota),
             ("model_list_prices", ModelListPrice),
             ("customer_sell_discounts", CustomerSellDiscount),
-            ("customers", Customer),
+            ("monitor_consumers", MonitorConsumer),
             ("demands", Demand),
             ("customer_usage_daily", CustomerUsageDaily),
         ]:

@@ -4,7 +4,7 @@ from flask import Blueprint, request
 from pydantic import BaseModel, Field
 
 from ..extensions import db
-from ..models import ClusterModelTpm, ConsumerModelTpm, GpuNodeCount, MonitorBatch
+from ..models import ClusterModelTpm, ConsumerModelTpm, GpuNodeCount, MonitorBatch, WatchedCluster
 from ..schemas.common import model_to_dict
 from ..services import ResourceMonitorService
 from ..utils.pagination import parse_pagination
@@ -95,8 +95,11 @@ def latest_cluster_tpm():
         .where(ClusterModelTpm.batch_id == batch_id)
         .order_by(ClusterModelTpm.cluster_name.asc(), ClusterModelTpm.data_time.asc())
     ).scalars().all()
+    watched_names = _watched_cluster_names()
     latest: dict[str, ClusterModelTpm] = {}
     for r in rows:
+        if watched_names and r.cluster_name not in watched_names:
+            continue
         latest[r.cluster_name] = r  # 升序遍历后保留最后一个
     return success({
         "batch_id": batch_id,
@@ -105,6 +108,7 @@ def latest_cluster_tpm():
 
 
 @bp.get("/monitor/consumer-tpm")
+
 def latest_consumer_tpm():
     """最新采集批次的客户×模型瞬时 TPM（可按 ai_consumer / ai_model 过滤，取各组合最后时间点）。"""
     batch_id = _latest_batch_id()
@@ -132,3 +136,13 @@ def _latest_batch_id() -> int | None:
     return db.session.execute(
         db.select(MonitorBatch.id).order_by(MonitorBatch.id.desc()).limit(1)
     ).scalar_one_or_none()
+
+
+def _watched_cluster_names() -> set[str]:
+    return {
+        item.cluster_name
+        for item in db.session.execute(
+            db.select(WatchedCluster).where(WatchedCluster.enabled.is_(True))
+        ).scalars()
+    }
+

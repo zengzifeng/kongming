@@ -52,7 +52,9 @@ export interface Evaluation extends BaseEntity {
 export interface DemandDetail {
   demand: Demand;
   latest_evaluation: Evaluation | null;
+  policy?: Policy | null;
 }
+
 
 export interface PolicyRun extends BaseEntity {
   run_no: string;
@@ -95,7 +97,19 @@ export interface PolicyDetail {
   actions: PolicyAction[];
 }
 
+export interface PolicyReport {
+  policy_id: number;
+  algorithm: string;
+  kpis: Record<string, number>;
+  unit_example: Record<string, unknown> | null;
+  attributions: Record<string, unknown>[];
+  cluster_utilization: Record<string, unknown>[];
+  peak_feasibility: Record<string, unknown>;
+  model_rebalance: Record<string, unknown> | null;
+}
+
 export interface RevenueAttribution extends BaseEntity {
+
   policy_id: number;
   mechanism: string;
   project_code: string;
@@ -277,5 +291,88 @@ export interface ResourceDashboard {
   clusters?: ResourceCluster[];
 }
 
+export interface ClusterTpmSnapshot extends BaseEntity {
+  batch_id: number;
+  data_time: string;
+  cluster_name: string;
+  tpm: number;
+  node_count: number;
+  node_avg_tpm: number;
+}
+
+export interface ConsumerTpmSnapshot extends BaseEntity {
+  batch_id: number;
+  data_time: string;
+  ai_consumer: string;
+  customer_code: string | null;
+  ai_model: string;
+  tpm: number;
+  self_ratio: number | null;
+  thirdparty_ratio: number | null;
+  avg_input_token: number | null;
+  avg_output_token: number | null;
+  cache_hit_rate: number | null;
+}
+
+export interface MonitorSnapshot<T> {
+  batch_id: number | null;
+  items: T[];
+}
+
+export interface FittingAlgorithm extends BaseEntity {
+  algo_name: string;
+  display_name: string;
+  description: string;
+  entry_ref: string;
+  enabled: boolean;
+  default_params: Record<string, unknown>;
+}
+
+export interface FittingConfig extends BaseEntity {
+  customer_code: string;
+  model_name: string;
+  period: 'idle' | 'busy';
+  algo_name: string;
+  params_json: Record<string, unknown>;
+  enabled: boolean;
+}
+
+export interface FittingResult extends BaseEntity {
+  level: 'customer' | 'cluster';
+  customer_code: string | null;
+  cluster_name: string | null;
+  model_name: string;
+  period: 'idle' | 'busy';
+  algo_name: string;
+  generated_at: string;
+  series_json: Array<[string, number]>;
+  meta_json: Record<string, unknown>;
+}
+
+export interface FittingResultsResponse {
+  items: FittingResult[];
+  total: number;
+}
+
+export interface WatchedCluster extends BaseEntity {
+  cluster_name: string;
+  enabled: boolean;
+  sort_order: number;
+}
+
+export interface JobSchedule extends BaseEntity {
+  job_name: string;
+
+  description: string;
+  trigger_type: 'cron' | 'interval' | string;
+  cron_expr: string | null;
+  interval_seconds: number | null;
+  enabled: boolean;
+  args_json: Record<string, unknown>;
+  last_run_at: string | null;
+  next_run_at: string | null;
+}
+
 export type QueryParams = Record<string, string | number | boolean | null | undefined>;
 export type UnknownRecord = Record<string, unknown>;
+

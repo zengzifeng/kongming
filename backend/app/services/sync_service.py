@@ -10,7 +10,6 @@ from sqlalchemy import select
 from ..extensions import db
 from ..integrations import filing_client
 from ..models import (
-    Customer,
     Demand,
     DemandStatus,
     RawFiling,

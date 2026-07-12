@@ -1,13 +1,20 @@
-import { Form, Input, InputNumber, message, Select } from 'antd';
+import { Button, Form, Input, InputNumber, message, Select } from 'antd';
+
+import { CheckOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
+
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { dashboardsApi, vendorsApi } from '../../api/kongming';
-import type { ResourceCluster, VendorQuota } from '../../api/types';
+import { dashboardsApi, fittingsApi, monitorApi, vendorsApi, watchedClustersApi } from '../../api/kongming';
+
+import type { ConsumerTpmSnapshot, FittingResult, ResourceCluster, VendorQuota } from '../../api/types';
+
 import { PageHeader } from '../../components/PageHeader';
 import { numberText, percent } from '../../utils/format';
+import { isWatchedCluster, watchedClusterNames } from '../../utils/watchedClusters';
 
 interface MetricItem {
+
   label: string;
   value: string;
 }
@@ -130,20 +137,34 @@ interface CapacityBarShapeProps {
 }
 
 
-const baseSelfHostedRows: SelfHostedClusterRow[] = [
-  { id: 'DeepSeek-V3.2', clusterName: 'DeepSeek-V3.2', deployedModel: 'DeepSeek-V3.2', provider: 'ksyun-dsv32-qy-10017', machineCount: 9, tpmPerMachine: 260, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'GLM-5.1-FP8', clusterName: 'GLM-5.1-FP8', deployedModel: 'GLM-5.1', provider: 'ksyun-glm5.1-qy-10056', machineCount: 6, tpmPerMachine: 260, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'GLM-5.1-KSCC', clusterName: 'GLM-5.1-KSCC', deployedModel: 'GLM-5.1', provider: 'ksyun-glm5.1-qy-10070', machineCount: 3, tpmPerMachine: 700, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'GLM-5.1-XISHANJU', clusterName: 'GLM-5.1-XISHANJU', deployedModel: 'GLM-5.1', provider: 'ksyun-glm5.1-qy-10068', machineCount: 2, tpmPerMachine: 200, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'GLM-5.2', clusterName: 'GLM-5.2', deployedModel: 'GLM-5.2', provider: 'ksyun-glm5.2-qy-10070', machineCount: 20, tpmPerMachine: 200, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'GLM-5.2-Tencent', clusterName: 'GLM-5.2-Tencent', deployedModel: 'GLM-5.2', provider: 'ksyun-glm5.2-qy-10071', machineCount: 24, tpmPerMachine: 250, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'jl-test', clusterName: 'jl-test', deployedModel: '测试机', provider: '', machineCount: 1, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'Kimi-K2.5-NVFP4-MIHAYOU', clusterName: 'Kimi-K2.5-NVFP4-MIHAYOU', deployedModel: 'Kimi-k2.5', provider: 'ksyun-kimi-k25-qy-10065', machineCount: 8, tpmPerMachine: 250, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'KSCC-TEST', clusterName: 'KSCC-TEST', deployedModel: '测试机', provider: '', machineCount: 2, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'llc-test1', clusterName: 'llc-test1', deployedModel: '测试机', provider: '', machineCount: 1, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'wd-test', clusterName: 'wd-test', deployedModel: '测试机', provider: '', machineCount: 2, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-  { id: 'weilai-test', clusterName: 'weilai-test', deployedModel: '测试机', provider: '', machineCount: 1, tpmPerMachine: 0, runtimeTpm: 0, totalCapacity: 0, clusterUtilization: 0, redundantTpm: 0, redundantMachines: 0 },
-];
+const chartColors = ['#27d7ff', '#5dffb2', '#f5d54b', '#9b8cff', '#ff8ab3', '#6aa7ff'];
+
+function timeLabel(value?: string) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function mapResourceCluster(cluster: ResourceCluster): SelfHostedClusterRow {
+  const row = {
+    id: `${cluster.cluster_name}-${cluster.deployed_model}`,
+    clusterName: cluster.cluster_name,
+    deployedModel: cluster.deployed_model,
+    provider: cluster.provider || '',
+    machineCount: Number(cluster.machine_count || 0),
+    tpmPerMachine: Number(cluster.tpm_per_machine_w ?? toWanTpm(cluster.tpm_per_machine)),
+    totalCapacity: Number(cluster.total_capacity_w ?? toWanTpm(cluster.total_capacity_tpm)),
+    runtimeTpm: Number(cluster.current_tpm_w ?? toWanTpm(cluster.current_tpm)),
+    realtimeRuntimeTpm: Number(cluster.current_tpm_w ?? toWanTpm(cluster.current_tpm)),
+    idleRuntimeTpm: Number(cluster.peak_tpm_idle !== undefined ? toWanTpm(cluster.peak_tpm_idle) : cluster.current_tpm_w ?? toWanTpm(cluster.current_tpm)),
+    busyRuntimeTpm: Number(cluster.peak_tpm_busy !== undefined ? toWanTpm(cluster.peak_tpm_busy) : cluster.current_tpm_w ?? toWanTpm(cluster.current_tpm)),
+    clusterUtilization: Number(cluster.cluster_utilization || 0),
+    redundantTpm: Number(cluster.current_redundant_w ?? toWanTpm(cluster.current_redundant_tpm)),
+    redundantMachines: Number(cluster.current_redundant_machines || 0),
+  };
+  return normalizeClusterRow(row);
+}
+
 
 function runtimeForPeriod(row: SelfHostedClusterRow, period: ResourcePeriod) {
   if (period === 'idle') return Number(row.idleRuntimeTpm ?? row.runtimeTpm);
@@ -222,156 +243,127 @@ function mergeClusterResponse(row: SelfHostedClusterRow, cluster: ResourceCluste
   return normalizeClusterRow(nextRow);
 }
 
-const modelTpmData = [
-  { time: '22:08', glm52: 520000, glm51: 12000 },
-  { time: '22:11', glm52: 4000000, glm51: 42000 },
-  { time: '22:15', glm52: 900000, glm51: 18000 },
-  { time: '22:20', glm52: 430000, glm51: 11000 },
-  { time: '22:28', glm52: 360000, glm51: 8000 },
-  { time: '22:35', glm52: 620000, glm51: 6000 },
-  { time: '22:42', glm52: 260000, glm51: 3000 },
-  { time: '22:47', glm52: 680000, glm51: 1000 },
-  { time: '22:52', glm52: 360000, glm51: 0 },
-  { time: '22:57', glm52: 640000, glm51: 0 },
-  { time: '23:05', glm52: 401000, glm51: 0 },
-];
-
-const shareData = [
-  { time: '22:08', glm51Self: 100, glm52Self: 100 },
-  { time: '22:11', glm51Self: 100, glm52Self: 100 },
-  { time: '22:20', glm51Self: 100, glm52Self: 100 },
-  { time: '22:35', glm51Self: 100, glm52Self: 100 },
-  { time: '22:50', glm51Self: 100, glm52Self: 100 },
-  { time: '23:05', glm51Self: 100, glm52Self: 100 },
-];
-
-const modelLines: ChartLine[] = [
-  { key: 'glm52', name: 'glm-5.2', color: '#f5d54b' },
-  { key: 'glm51', name: 'glm-5.1', color: '#5dffb2' },
-];
-
-const shareLines: ChartLine[] = [
-  { key: 'glm51Self', name: 'glm-5.1 自建', color: '#5dffb2' },
-  { key: 'glm52Self', name: 'glm-5.2 自建', color: '#f5d54b' },
-];
-
-const clusterFitData = [
-  { time: '00:00', glm51Fp8: 178000, glm51Kscc: 190000, glm52: 166000, kimi: 184000 },
-  { time: '01:00', glm51Fp8: 138000, glm51Kscc: 152000, glm52: 130000, kimi: 144000 },
-  { time: '02:00', glm51Fp8: 116000, glm51Kscc: 127000, glm52: 110000, kimi: 121000 },
-  { time: '03:00', glm51Fp8: 101000, glm51Kscc: 108000, glm52: 98000, kimi: 105000 },
-  { time: '04:00', glm51Fp8: 96000, glm51Kscc: 101000, glm52: 92000, kimi: 99000 },
-  { time: '05:00', glm51Fp8: 146000, glm51Kscc: 158000, glm52: 136000, kimi: 151000 },
-  { time: '06:00', glm51Fp8: 254000, glm51Kscc: 276000, glm52: 238000, kimi: 266000 },
-  { time: '07:00', glm51Fp8: 356000, glm51Kscc: 382000, glm52: 334000, kimi: 398000 },
-  { time: '08:00', glm51Fp8: 328000, glm51Kscc: 362000, glm52: 316000, kimi: 372000 },
-];
-
-const clusterFitLines: FitWaveLine[] = [
-  { key: 'glm51Fp8', name: 'GLM-5.1-FP8', color: '#27d7ff' },
-  { key: 'glm51Kscc', name: 'GLM-5.1-KSCC', color: '#5dffb2' },
-  { key: 'glm52', name: 'GLM-5.2', color: '#f5d54b', strokeDasharray: '5 5' },
-  { key: 'kimi', name: 'Kimi-K2.5-MIHAYOU', color: '#9b8cff' },
-];
-
-const customerFitWaves: CustomerFitWave[] = [
-  {
-    model: 'GLM-5.1',
-    yDomain: [0, 260000],
-    yTicks: [0, 65000, 130000, 195000, 260000],
-    data: [
-      { time: '00:00', bodhimind: 106000, kscc: 86000, xishanju: 62000, mihayou: 52000 },
-      { time: '01:00', bodhimind: 82000, kscc: 72000, xishanju: 54000, mihayou: 47000 },
-      { time: '02:00', bodhimind: 69000, kscc: 61000, xishanju: 48000, mihayou: 42000 },
-      { time: '03:00', bodhimind: 62000, kscc: 56000, xishanju: 43000, mihayou: 39000 },
-      { time: '04:00', bodhimind: 60000, kscc: 52000, xishanju: 41000, mihayou: 37000 },
-      { time: '05:00', bodhimind: 89000, kscc: 76000, xishanju: 58000, mihayou: 51000 },
-      { time: '06:00', bodhimind: 146000, kscc: 126000, xishanju: 94000, mihayou: 88000 },
-      { time: '07:00', bodhimind: 214000, kscc: 172000, xishanju: 128000, mihayou: 116000 },
-      { time: '08:00', bodhimind: 198000, kscc: 164000, xishanju: 120000, mihayou: 109000 },
-    ],
-    lines: [
-      { key: 'bodhimind', name: 'BODHIMIND SDN.BHD.', color: '#27d7ff' },
-      { key: 'kscc', name: 'KSCC', color: '#5dffb2' },
-      { key: 'xishanju', name: '西山居', color: '#f5d54b', strokeDasharray: '5 5' },
-      { key: 'mihayou', name: '米哈游', color: '#ff8ab3' },
-    ],
-    ratios: [
-      { key: 'bodhimind', name: 'BODHIMIND SDN.BHD.', color: '#27d7ff', selfRatio: 0.72, vendorRatio: 0.28 },
-      { key: 'kscc', name: 'KSCC', color: '#5dffb2', selfRatio: 0.84, vendorRatio: 0.16 },
-      { key: 'xishanju', name: '西山居', color: '#f5d54b', selfRatio: 0.68, vendorRatio: 0.32 },
-      { key: 'mihayou', name: '米哈游', color: '#ff8ab3', selfRatio: 0.76, vendorRatio: 0.24 },
-    ],
-  },
-  {
-    model: 'GLM-5.2',
-    yDomain: [0, 520000],
-    yTicks: [0, 130000, 260000, 390000, 520000],
-    data: [
-      { time: '00:00', bodhimind: 186000, tencent: 162000, gameOps: 126000, searchLab: 94000 },
-      { time: '01:00', bodhimind: 146000, tencent: 130000, gameOps: 98000, searchLab: 76000 },
-      { time: '02:00', bodhimind: 124000, tencent: 108000, gameOps: 88000, searchLab: 68000 },
-      { time: '03:00', bodhimind: 104000, tencent: 92000, gameOps: 76000, searchLab: 62000 },
-      { time: '04:00', bodhimind: 99000, tencent: 88000, gameOps: 72000, searchLab: 58000 },
-      { time: '05:00', bodhimind: 152000, tencent: 136000, gameOps: 108000, searchLab: 84000 },
-      { time: '06:00', bodhimind: 282000, tencent: 248000, gameOps: 196000, searchLab: 146000 },
-      { time: '07:00', bodhimind: 428000, tencent: 362000, gameOps: 276000, searchLab: 204000 },
-      { time: '08:00', bodhimind: 398000, tencent: 344000, gameOps: 254000, searchLab: 188000 },
-    ],
-    lines: [
-      { key: 'bodhimind', name: 'BODHIMIND SDN.BHD.', color: '#27d7ff' },
-      { key: 'tencent', name: '腾讯云游戏', color: '#5dffb2' },
-      { key: 'gameOps', name: '游戏运营平台', color: '#f5d54b', strokeDasharray: '5 5' },
-      { key: 'searchLab', name: '搜索实验室', color: '#9b8cff' },
-    ],
-    ratios: [
-      { key: 'bodhimind', name: 'BODHIMIND SDN.BHD.', color: '#27d7ff', selfRatio: 0.64, vendorRatio: 0.36 },
-      { key: 'tencent', name: '腾讯云游戏', color: '#5dffb2', selfRatio: 0.71, vendorRatio: 0.29 },
-      { key: 'gameOps', name: '游戏运营平台', color: '#f5d54b', selfRatio: 0.58, vendorRatio: 0.42 },
-      { key: 'searchLab', name: '搜索实验室', color: '#9b8cff', selfRatio: 0.82, vendorRatio: 0.18 },
-    ],
-  },
-  {
-    model: 'Kimi-k2.5',
-    yDomain: [0, 360000],
-    yTicks: [0, 90000, 180000, 270000, 360000],
-    data: [
-      { time: '00:00', mihayou: 134000, kscc: 112000, contentOps: 76000, qa: 52000 },
-      { time: '01:00', mihayou: 104000, kscc: 89000, contentOps: 62000, qa: 46000 },
-      { time: '02:00', mihayou: 92000, kscc: 78000, contentOps: 54000, qa: 41000 },
-      { time: '03:00', mihayou: 84000, kscc: 70000, contentOps: 50000, qa: 38000 },
-      { time: '04:00', mihayou: 80000, kscc: 66000, contentOps: 48000, qa: 36000 },
-      { time: '05:00', mihayou: 126000, kscc: 98000, contentOps: 70000, qa: 51000 },
-      { time: '06:00', mihayou: 218000, kscc: 166000, contentOps: 116000, qa: 82000 },
-      { time: '07:00', mihayou: 314000, kscc: 236000, contentOps: 164000, qa: 112000 },
-      { time: '08:00', mihayou: 292000, kscc: 224000, contentOps: 152000, qa: 104000 },
-    ],
-    lines: [
-      { key: 'mihayou', name: '米哈游', color: '#27d7ff' },
-      { key: 'kscc', name: 'KSCC', color: '#5dffb2' },
-      { key: 'contentOps', name: '内容运营', color: '#f5d54b', strokeDasharray: '5 5' },
-      { key: 'qa', name: '评测任务', color: '#ff8ab3' },
-    ],
-    ratios: [
-      { key: 'mihayou', name: '米哈游', color: '#27d7ff', selfRatio: 0.79, vendorRatio: 0.21 },
-      { key: 'kscc', name: 'KSCC', color: '#5dffb2', selfRatio: 0.67, vendorRatio: 0.33 },
-      { key: 'contentOps', name: '内容运营', color: '#f5d54b', selfRatio: 0.74, vendorRatio: 0.26 },
-      { key: 'qa', name: '评测任务', color: '#ff8ab3', selfRatio: 0.61, vendorRatio: 0.39 },
-    ],
-  },
-];
-
-const busyFitTimes = ['08:00', '10:00', '12:00', '14:00', '16:00', '18:00', '20:00', '22:00', '24:00'];
-
-function retimeFitData(data: Array<Record<string, number | string>>, times: string[]) {
-  return data.map((point, index) => ({ ...point, time: times[index] || String(point.time) }));
+function chartMax(data: Array<Record<string, number | string>>, lines: ChartLine[]) {
+  return Math.max(...lines.flatMap((line) => data.map((point) => Number(point[line.key] || 0))), 1);
 }
 
-const busyClusterFitData = retimeFitData(clusterFitData, busyFitTimes);
-const busyCustomerFitWaves: CustomerFitWave[] = customerFitWaves.map((wave) => ({
-  ...wave,
-  data: retimeFitData(wave.data, busyFitTimes),
-}));
+function chartDomain(data: Array<Record<string, number | string>>, lines: ChartLine[]): [number, number] {
+  const max = chartMax(data, lines);
+  return [0, Math.ceil(max * 1.2)];
+}
+
+function chartTicks(data: Array<Record<string, number | string>>, lines: ChartLine[]) {
+  const max = chartDomain(data, lines)[1];
+  return Array.from({ length: 5 }, (_, index) => Math.round((max / 4) * index));
+}
+
+function buildSummary(data: Array<Record<string, number | string>>, lines: ChartLine[], formatter: (value: number) => string): ChartSummaryRow[] {
+  return lines.map((line) => {
+    const values = data.map((point) => Number(point[line.key] || 0));
+    const max = values.length ? Math.max(...values) : 0;
+    const mean = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    const last = values[values.length - 1] || 0;
+    return { label: line.name, color: line.color, max: formatter(max), mean: formatter(mean), last: formatter(last) };
+  });
+}
+
+function buildModelRuntime(items: ConsumerTpmSnapshot[]) {
+  const models = Array.from(new Set(items.map((item) => item.ai_model))).slice(0, 6);
+  const lines = models.map((model, index) => ({ key: `model${index}`, name: model, color: chartColors[index % chartColors.length] }));
+  const byTime = new Map<string, Record<string, number | string>>();
+  items.forEach((item) => {
+    const modelIndex = models.indexOf(item.ai_model);
+    if (modelIndex < 0) return;
+    const time = timeLabel(item.data_time);
+    const row = byTime.get(time) || { time };
+    const key = `model${modelIndex}`;
+    row[key] = Number(row[key] || 0) + Number(item.tpm || 0);
+    byTime.set(time, row);
+  });
+  const data = Array.from(byTime.values());
+  return { data, lines, yDomain: chartDomain(data, lines), yTicks: chartTicks(data, lines), summary: buildSummary(data, lines, formatTpm) };
+}
+
+function buildShareRuntime(items: ConsumerTpmSnapshot[]) {
+  const models = Array.from(new Set(items.map((item) => item.ai_model))).slice(0, 6);
+  const lines = models.map((model, index) => ({ key: `share${index}`, name: `${model} 自建`, color: chartColors[index % chartColors.length] }));
+  const buckets = new Map<string, { row: Record<string, number | string>; count: Record<string, number> }>();
+  items.forEach((item) => {
+    const modelIndex = models.indexOf(item.ai_model);
+    if (modelIndex < 0 || item.self_ratio === null || item.self_ratio === undefined) return;
+    const time = timeLabel(item.data_time);
+    const bucket = buckets.get(time) || { row: { time }, count: {} };
+    const key = `share${modelIndex}`;
+    bucket.row[key] = Number(bucket.row[key] || 0) + Number(item.self_ratio || 0) * 100;
+    bucket.count[key] = (bucket.count[key] || 0) + 1;
+    buckets.set(time, bucket);
+  });
+  const data = Array.from(buckets.values()).map((bucket) => {
+    lines.forEach((line) => {
+      if (bucket.count[line.key]) bucket.row[line.key] = Number(bucket.row[line.key] || 0) / bucket.count[line.key];
+    });
+    return bucket.row;
+  });
+  return { data, lines, summary: buildSummary(data, lines, formatPercentAxis) };
+}
+
+function buildFittingChart(results: FittingResult[]) {
+  const selected = results.slice(0, 6);
+  const lines = selected.map((item, index) => ({
+    key: `fit${index}`,
+    name: item.cluster_name || item.customer_code || item.model_name,
+    color: chartColors[index % chartColors.length],
+    strokeDasharray: index === 2 ? '5 5' : undefined,
+  }));
+  const rows: Array<Record<string, number | string>> = [];
+  selected.forEach((result, resultIndex) => {
+    const key = `fit${resultIndex}`;
+    (result.series_json || []).forEach(([ts, value], pointIndex) => {
+      const row = rows[pointIndex] || { time: timeLabel(ts) };
+      row[key] = Number(value || 0);
+      rows[pointIndex] = row;
+    });
+  });
+  return { data: rows, lines, yDomain: chartDomain(rows, lines), yTicks: chartTicks(rows, lines) };
+}
+
+function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnapshot[]): CustomerFitWave[] {
+  const byModel = new Map<string, FittingResult[]>();
+  results.forEach((result) => {
+    const items = byModel.get(result.model_name) || [];
+    items.push(result);
+    byModel.set(result.model_name, items);
+  });
+  return Array.from(byModel.entries()).map(([model, modelResults]) => {
+    const selected = modelResults.slice(0, 6);
+    const lines = selected.map((result, index) => ({
+      key: `customer${index}`,
+      name: result.customer_code || result.cluster_name || result.model_name,
+      color: chartColors[index % chartColors.length],
+      strokeDasharray: index === 2 ? '5 5' : undefined,
+    }));
+    const data: Array<Record<string, number | string>> = [];
+    selected.forEach((result, resultIndex) => {
+      const key = `customer${resultIndex}`;
+      (result.series_json || []).forEach(([ts, value], pointIndex) => {
+        const row = data[pointIndex] || { time: timeLabel(ts) };
+        row[key] = Number(value || 0);
+        data[pointIndex] = row;
+      });
+    });
+    const dispatchRatios = selected.map((result, index) => {
+      const current = ratios.find((item) => item.ai_model === result.model_name && item.customer_code === result.customer_code);
+      const selfRatio = Number(current?.self_ratio || 0);
+      const vendorRatio = Number(current?.thirdparty_ratio ?? Math.max(1 - selfRatio, 0));
+      return { key: `customer${index}`, name: result.customer_code || result.cluster_name || result.model_name, color: chartColors[index % chartColors.length], selfRatio, vendorRatio };
+    });
+    return { model, data, lines, ratios: dispatchRatios, yDomain: chartDomain(data, lines), yTicks: chartTicks(data, lines) };
+  });
+}
+
+function emptyCustomerFitWave(): CustomerFitWave {
+  return { model: '-', data: [], lines: [], ratios: [], yDomain: [0, 1], yTicks: [0, 1] };
+}
 
 
 function formatTpm(value: number) {
@@ -570,37 +562,82 @@ const resourceSections: Array<{ title: string; period: ResourcePeriod }> = [
 ];
 
 export function RealtimeDashboard() {
-  const [selfHostedRows, setSelfHostedRows] = useState<SelfHostedClusterRow[]>(() => baseSelfHostedRows.map(normalizeClusterRow));
+  const [selfHostedRows, setSelfHostedRows] = useState<SelfHostedClusterRow[]>([]);
   const [vendorRows, setVendorRows] = useState<VendorRuntimeRow[]>([]);
+  const [consumerSnapshots, setConsumerSnapshots] = useState<ConsumerTpmSnapshot[]>([]);
+  const [idleClusterFits, setIdleClusterFits] = useState<FittingResult[]>([]);
+  const [busyClusterFits, setBusyClusterFits] = useState<FittingResult[]>([]);
+  const [idleCustomerFits, setIdleCustomerFits] = useState<FittingResult[]>([]);
+  const [busyCustomerFits, setBusyCustomerFits] = useState<FittingResult[]>([]);
   const [savingClusterId, setSavingClusterId] = useState<string | null>(null);
-  const [selectedFitModel, setSelectedFitModel] = useState(customerFitWaves[0].model);
+  const [editingClusterId, setEditingClusterId] = useState<string | null>(null);
+  const [editingTpmValue, setEditingTpmValue] = useState<number | null>(null);
+  const [selectedFitModel, setSelectedFitModel] = useState('');
+
   const [selectedCustomerKey, setSelectedCustomerKey] = useState<string | null>(null);
 
   const vendorMetrics = useMemo(() => buildVendorMetrics(vendorRows), [vendorRows]);
-
+  const modelRuntime = useMemo(() => buildModelRuntime(consumerSnapshots), [consumerSnapshots]);
+  const shareRuntime = useMemo(() => buildShareRuntime(consumerSnapshots), [consumerSnapshots]);
+  const idleClusterFit = useMemo(() => buildFittingChart(idleClusterFits), [idleClusterFits]);
+  const busyClusterFit = useMemo(() => buildFittingChart(busyClusterFits), [busyClusterFits]);
+  const idleCustomerFitWaves = useMemo(() => buildCustomerFitWaves(idleCustomerFits, consumerSnapshots), [idleCustomerFits, consumerSnapshots]);
+  const busyCustomerFitWaves = useMemo(() => buildCustomerFitWaves(busyCustomerFits, consumerSnapshots), [busyCustomerFits, consumerSnapshots]);
 
   useEffect(() => {
     let cancelled = false;
-    dashboardsApi.resources({}).then((data) => {
-      if (cancelled || !data.clusters?.length) return;
-      setSelfHostedRows((rows) => rows.map((row) => {
-        const cluster = data.clusters?.find((item) => item.cluster_name === row.clusterName && item.deployed_model === row.deployedModel);
-        if (!cluster) return row;
-        return mergeClusterResponse(row, cluster);
-      }));
+    const watchedNamesPromise = watchedClustersApi.list().then(watchedClusterNames);
+    watchedNamesPromise.then((watchedNames) => dashboardsApi.resources({}).then((data) => ({ data, watchedNames }))).then(({ data, watchedNames }) => {
+      if (cancelled) return;
+      setSelfHostedRows((data.clusters || []).filter((cluster) => isWatchedCluster(cluster.cluster_name, watchedNames)).map(mapResourceCluster));
     }).catch(() => undefined);
+
     vendorsApi.quotas({ status: 'active', page_size: 100 }).then((data) => {
+
       if (cancelled) return;
       setVendorRows(data.items.map(mapVendorQuota));
+    }).catch(() => undefined);
+    monitorApi.consumerTpm().then((data) => {
+      if (cancelled) return;
+      setConsumerSnapshots(data.items || []);
+    }).catch(() => undefined);
+    watchedNamesPromise.then((names) => fittingsApi.results({ level: 'cluster', period: 'idle', page_size: 100 }).then((data) => ({ data, names }))).then(({ data, names }) => {
+      if (cancelled) return;
+      setIdleClusterFits((data.items || []).filter((item) => isWatchedCluster(item.cluster_name, names)));
+    }).catch(() => undefined);
+    watchedNamesPromise.then((names) => fittingsApi.results({ level: 'cluster', period: 'busy', page_size: 100 }).then((data) => ({ data, names }))).then(({ data, names }) => {
+      if (cancelled) return;
+      setBusyClusterFits((data.items || []).filter((item) => isWatchedCluster(item.cluster_name, names)));
+    }).catch(() => undefined);
+
+
+    fittingsApi.results({ level: 'customer', period: 'idle', page_size: 100 }).then((data) => {
+      if (cancelled) return;
+      setIdleCustomerFits(data.items || []);
+    }).catch(() => undefined);
+    fittingsApi.results({ level: 'customer', period: 'busy', page_size: 100 }).then((data) => {
+      if (cancelled) return;
+      setBusyCustomerFits(data.items || []);
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 
+  useEffect(() => {
+    const nextModel = idleCustomerFitWaves[0]?.model || busyCustomerFitWaves[0]?.model || '';
+    if (!selectedFitModel && nextModel) setSelectedFitModel(nextModel);
+  }, [idleCustomerFitWaves, busyCustomerFitWaves, selectedFitModel]);
+
+
   const saveTpmPerMachine = async (record: SelfHostedClusterRow, value: number | null) => {
     const nextValue = Number(value || 0);
-    if (nextValue === record.tpmPerMachine) return;
+    if (nextValue === record.tpmPerMachine) {
+      setEditingClusterId(null);
+      setEditingTpmValue(null);
+      return;
+    }
     setSavingClusterId(record.id);
     try {
+
       const updatedCluster = await dashboardsApi.updateClusterResource({
         cluster_name: record.clusterName,
         deployed_model: record.deployedModel,
@@ -610,7 +647,10 @@ export function RealtimeDashboard() {
         current_tpm_w: record.realtimeRuntimeTpm ?? record.runtimeTpm,
       });
       setSelfHostedRows((rows) => rows.map((row) => (row.id === record.id ? mergeClusterResponse(row, updatedCluster) : row)));
+      setEditingClusterId(null);
+      setEditingTpmValue(null);
       message.success('单机承载能力已保存');
+
     } catch (error) {
       message.error(error instanceof Error ? error.message : '单机承载能力保存失败');
     } finally {
@@ -618,18 +658,53 @@ export function RealtimeDashboard() {
     }
   };
 
-  const renderTpmInput = (record: SelfHostedClusterRow) => (
-    <InputNumber
-      key={`${record.id}-${record.tpmPerMachine}`}
-      className="realtime-cell-number"
-      min={0}
-      size="small"
-      defaultValue={Number(record.tpmPerMachine || 0)}
-      disabled={savingClusterId === record.id}
-      onPressEnter={(event) => event.currentTarget.blur()}
-      onBlur={(event) => saveTpmPerMachine(record, Number(event.currentTarget.value))}
-    />
-  );
+  const renderTpmInput = (record: SelfHostedClusterRow) => {
+    const editing = editingClusterId === record.id;
+    if (!editing) {
+      return (
+        <button
+          type="button"
+          className="cluster-tpm-value-button"
+          disabled={savingClusterId === record.id}
+          onClick={() => {
+            setEditingClusterId(record.id);
+            setEditingTpmValue(Number(record.tpmPerMachine || 0));
+          }}
+        >
+          {numberText(record.tpmPerMachine)}
+        </button>
+      );
+    }
+    return (
+      <div className="cluster-tpm-editor">
+        <InputNumber
+          className="realtime-cell-number"
+          min={0}
+          size="small"
+          value={editingTpmValue ?? 0}
+          disabled={savingClusterId === record.id}
+          autoFocus
+          onChange={(value) => setEditingTpmValue(Number(value || 0))}
+          onPressEnter={() => saveTpmPerMachine(record, editingTpmValue)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              setEditingClusterId(null);
+              setEditingTpmValue(null);
+            }
+          }}
+        />
+        <Button
+          className="cluster-tpm-confirm"
+          type="text"
+          size="small"
+          icon={<CheckOutlined />}
+          loading={savingClusterId === record.id}
+          onClick={() => saveTpmPerMachine(record, editingTpmValue)}
+        />
+      </div>
+    );
+  };
+
 
   const renderSelfHostedClusterChart = (period: ResourcePeriod) => {
     const chartRows = buildClusterRows(selfHostedRows, period).filter((row) => row.id !== 'total');
@@ -747,40 +822,32 @@ export function RealtimeDashboard() {
       <div className="realtime-chart-stack">
         <RuntimeLineChart
           title="售卖模型TPM(BODHIMIND SDN.BHD.)"
-          data={modelTpmData}
-          lines={modelLines}
-          yDomain={[0, 4200000]}
-          yTicks={[0, 1000000, 2000000, 4000000]}
+          data={modelRuntime.data}
+          lines={modelRuntime.lines}
+          yDomain={modelRuntime.yDomain}
+          yTicks={modelRuntime.yTicks}
           yFormatter={formatTpm}
-          summary={[
-            { label: 'glm-5.2', color: '#f5d54b', max: '4 Mil', mean: '801 K', last: '401 K' },
-            { label: 'glm-5.1', color: '#5dffb2', max: '42 K', mean: '6 K', last: '0' },
-          ]}
+          summary={modelRuntime.summary}
         />
         <RuntimeLineChart
           title="售卖模型分发后端TPM占比(自建第三方维度，BODHIMIND SDN.BHD.)"
-          data={shareData}
-          lines={shareLines}
+          data={shareRuntime.data}
+          lines={shareRuntime.lines}
           yDomain={[0, 200]}
           yTicks={[0, 50, 100, 150, 200]}
           yFormatter={formatPercentAxis}
-          summary={[
-            { label: 'glm-5.1 自建', color: '#5dffb2', max: '100.00%', mean: '100.00%', last: '100.00%' },
-            { label: 'glm-5.2 自建', color: '#f5d54b', max: '100.00%', mean: '100.00%', last: '100.00%' },
-          ]}
+          summary={shareRuntime.summary}
         />
         <RuntimeLineChart
           title="售卖模型分发后端TPM占比(模型维度，BODHIMIND SDN.BHD.)"
-          data={shareData}
-          lines={shareLines}
+          data={shareRuntime.data}
+          lines={shareRuntime.lines}
           yDomain={[0, 200]}
           yTicks={[0, 50, 100, 150, 200]}
           yFormatter={formatPercentAxis}
-          summary={[
-            { label: 'glm-5.1 自建', color: '#5dffb2', max: '100.00%', mean: '100.00%', last: '100.00%' },
-            { label: 'glm-5.2 自建', color: '#f5d54b', max: '100.00%', mean: '100.00%', last: '100.00%' },
-          ]}
+          summary={shareRuntime.summary}
         />
+
       </div>
     </section>
   );
@@ -819,9 +886,11 @@ export function RealtimeDashboard() {
   const renderFitRuntime = (period: Extract<ResourcePeriod, 'idle' | 'busy'>) => {
 
     const isBusy = period === 'busy';
-    const customerWaves = isBusy ? busyCustomerFitWaves : customerFitWaves;
-    const selectedCustomerFitWave = customerWaves.find((item) => item.model === selectedFitModel) || customerWaves[0];
+    const clusterFit = isBusy ? busyClusterFit : idleClusterFit;
+    const customerWaves = isBusy ? busyCustomerFitWaves : idleCustomerFitWaves;
+    const selectedCustomerFitWave = customerWaves.find((item) => item.model === selectedFitModel) || customerWaves[0] || emptyCustomerFitWave();
     const watermarks = getCustomerWatermarks(selectedCustomerFitWave);
+
     const selectedWatermark = watermarks.find((item) => item.key === selectedCustomerKey) || null;
     const activeCustomerKey = selectedWatermark?.key || null;
 
@@ -832,12 +901,13 @@ export function RealtimeDashboard() {
           <div className="wire-card-title">集群拟合波形</div>
           <RuntimeLineChart
             title={isBusy ? '忙时跑量预估（08:00-24:00）' : '闲时跑量预估'}
-            data={isBusy ? busyClusterFitData : clusterFitData}
-            lines={clusterFitLines}
-            yDomain={isBusy ? [0, 720000] : [0, 600000]}
-            yTicks={isBusy ? [0, 180000, 360000, 540000, 720000] : [0, 150000, 300000, 450000, 600000]}
+            data={clusterFit.data}
+            lines={clusterFit.lines}
+            yDomain={clusterFit.yDomain}
+            yTicks={clusterFit.yTicks}
             yFormatter={formatTpm}
           />
+
         </section>
         <section className="wire-card realtime-panel realtime-runtime-panel idle-fit-panel">
           <div className="idle-fit-title-row">
@@ -851,7 +921,8 @@ export function RealtimeDashboard() {
                     setSelectedCustomerKey(null);
                   }}
 
-                  options={customerFitWaves.map((item) => ({ label: item.model, value: item.model }))}
+                  options={customerWaves.map((item) => ({ label: item.model, value: item.model }))}
+
                 />
               </Form.Item>
 

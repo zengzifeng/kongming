@@ -13,7 +13,7 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
   query?: Record<string, string | number | boolean | null | undefined>;
 }
@@ -51,4 +51,5 @@ export const apiClient = {
   get: <T>(path: string, query?: RequestOptions['query']) => request<T>(path, { query }),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
+  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };

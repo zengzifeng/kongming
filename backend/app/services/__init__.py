@@ -12,6 +12,7 @@ from .alert_service import AlertService
 from .job_schedule_service import JobScheduleService
 from .resource_monitor_service import ResourceMonitorService
 from .wave_fitting_service import WaveFittingService
+from .watched_cluster_service import WatchedClusterService
 
 __all__ = [
     "SyncService",
@@ -28,4 +29,5 @@ __all__ = [
     "JobScheduleService",
     "ResourceMonitorService",
     "WaveFittingService",
+    "WatchedClusterService",
 ]

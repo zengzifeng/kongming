@@ -4,54 +4,57 @@ import { useMemo, useState } from 'react';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusTag } from '../../components/StatusTag';
 import { JsonBlock } from '../../components/JsonBlock';
-import { policiesApi } from '../../api/kongming';
-import type { Policy, PolicyDetail } from '../../api/types';
+import { dashboardsApi, monitorApi, policiesApi, revenueApi, watchedClustersApi } from '../../api/kongming';
+import type { ClusterTpmSnapshot, Policy, PolicyDetail, ResourceCluster, RevenueAnalysisItem } from '../../api/types';
 import { useAsync } from '../../hooks/useAsync';
 import { dateText, money, numberText } from '../../utils/format';
 import { parseJsonObject } from '../../utils/json';
+import { isWatchedCluster, watchedClusterNames } from '../../utils/watchedClusters';
 
-const peakRuntime = [
-  { time: '09:00', clusterA: 520, clusterB: 620, clusterC: 680, clusterD: 750, watermark: 760 },
-  { time: '10:00', clusterA: 610, clusterB: 690, clusterC: 650, clusterD: 780, watermark: 760 },
-  { time: '11:00', clusterA: 820, clusterB: 710, clusterC: 690, clusterD: 800, watermark: 760 },
-  { time: '12:00', clusterA: 760, clusterB: 710, clusterC: 700, clusterD: 850, watermark: 760 },
-  { time: '13:00', clusterA: 920, clusterB: 740, clusterC: 720, clusterD: 900, watermark: 760 },
-  { time: '14:00', clusterA: 700, clusterB: 720, clusterC: 690, clusterD: 870, watermark: 760 },
-  { time: '15:00', clusterA: 660, clusterB: 700, clusterC: 680, clusterD: 840, watermark: 760 },
-];
+function timeLabel(value?: string) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 
-const shavingResources = [
-  { cluster: 'Cluster-A', redundant: 360, gain: 1800 },
-  { cluster: 'Cluster-B', redundant: 420, gain: 2200 },
-  { cluster: 'Cluster-C', redundant: 290, gain: 1300 },
-];
+function buildPeakRuntime(items: ClusterTpmSnapshot[]) {
+  const row: Record<string, string | number> = { time: items[0] ? timeLabel(items[0].data_time) : '-' };
+  items.slice(0, 4).forEach((item, index) => { row[`cluster${String.fromCharCode(65 + index)}`] = Number(item.tpm || 0); });
+  row.watermark = Math.max(0, ...items.slice(0, 4).map((item) => Number(item.node_avg_tpm || 0)));
+  return items.length ? [row] : [];
+}
 
-const clusterActions = [
-  { cluster: 'Cluster-A', move: '水位线以上切三方', watermark: '760 TPM', protected: 'P0/P1' },
-  { cluster: 'Cluster-B', move: '峰值时段柔性限流', watermark: '760 TPM', protected: 'P0/P1' },
-  { cluster: 'Cluster-C', move: '低毛利流量后移', watermark: '720 TPM', protected: 'P1' },
-  { cluster: 'Cluster-D', move: '保留 P99 容量', watermark: '840 TPM', protected: 'P0' },
-];
+function shavingResource(cluster: ResourceCluster, policies: Policy[]) {
+  const gain = policies.reduce((sum, item) => sum + Number(item.expected_peak_shaving_gain || item.expected_revenue_gain || 0), 0) / Math.max(policies.length, 1);
+  return { cluster: cluster.cluster_name, redundant: Number(cluster.current_redundant_tpm || 0), gain };
+}
 
-const shavingForecast = [
-  { date: '2026/6/1', before: 5500, after: 4000, shaved: 1500, beforeMachines: 33, afterMachines: 30 },
-  { date: '2026/6/2', before: 5350, after: 4000, shaved: 1350, beforeMachines: 33, afterMachines: 29 },
-  { date: '2026/6/3', before: 5740, after: 4000, shaved: 1740, beforeMachines: 33, afterMachines: 28 },
-];
+function clusterAction(cluster: ResourceCluster) {
+  return { cluster: cluster.cluster_name, move: cluster.deployed_model, watermark: `${numberText(cluster.current_tpm || 0)} TPM`, protected: cluster.primary_customer || '-' };
+}
 
-const forecastPolicies = [
-  { policyNo: 'POL-PEAK-0627C', expectedGain: 98000, status: 'accepted' },
-];
+function forecastRow(cluster: ResourceCluster) {
+  const before = Number(cluster.current_tpm || 0) + Number(cluster.current_redundant_tpm || 0);
+  const after = Number(cluster.current_tpm || 0);
+  return {
+    date: cluster.cluster_name,
+    before,
+    after,
+    shaved: Math.max(before - after, 0),
+    beforeMachines: Number(cluster.machine_count || 0),
+    afterMachines: Math.max(Number(cluster.machine_count || 0) - Number(cluster.current_redundant_machines || 0), 0),
+  };
+}
 
-const revenueTrend = [
-  { day: 'D-6', expected: 1700, actual: 1600, gap: -100 },
-  { day: 'D-5', expected: 2300, actual: 2380, gap: 80 },
-  { day: 'D-4', expected: 2600, actual: 2500, gap: -100 },
-  { day: 'D-3', expected: 3100, actual: 3320, gap: 220 },
-  { day: 'D-2', expected: 3900, actual: 3610, gap: -290 },
-  { day: 'D-1', expected: 4300, actual: 4480, gap: 180 },
-  { day: '今日', expected: 5100, actual: 4920, gap: -180 },
-];
+function revenueRows(items: RevenueAnalysisItem[], policies: Policy[]) {
+  const allowed = new Set(policies.map((item) => item.id));
+  return items.filter((item) => allowed.has(item.policy_id)).slice(-7).map((item) => ({
+    day: item.policy_no,
+    expected: Number(item.expected_revenue_gain || 0),
+    actual: Number(item.actual_revenue_gain || 0),
+    gap: Number(item.revenue_gap || 0),
+  }));
+}
 
 function pickPolicies(policies: Policy[], key: string) {
   return policies.filter((item) => item.algorithm === key || JSON.stringify(item.summary_json || {}).includes(key));
@@ -64,8 +67,26 @@ export function PeakShavingDashboard() {
   const [editOpen, setEditOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
+  const resources = useAsync(() => dashboardsApi.resources({}), []);
+  const clusterTpm = useAsync(() => monitorApi.clusterTpm(), []);
+  const revenue = useAsync(() => revenueApi.analysis(), []);
+  const watchedClusters = useAsync(() => watchedClustersApi.list(), []);
+  const watchedNames = watchedClusterNames(watchedClusters.data);
   const peakPolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'peak_shaving'), [policies.data?.items]);
-  const displayGain = 98661.89;
+  const resourceClusters = (resources.data?.clusters || []).filter((cluster) => isWatchedCluster(cluster.cluster_name, watchedNames));
+  const clusterTpmItems = (clusterTpm.data?.items || []).filter((item) => isWatchedCluster(item.cluster_name, watchedNames));
+  const peakRuntime = buildPeakRuntime(clusterTpmItems);
+  const shavingResources = resourceClusters.map((cluster) => shavingResource(cluster, peakPolicies)).slice(0, 6);
+  const clusterActions = resourceClusters.map(clusterAction).slice(0, 6);
+  const shavingForecast = resourceClusters.map(forecastRow).slice(0, 6);
+  const forecastPolicies = peakPolicies.map((policy) => ({
+    policyId: policy.id,
+    policyNo: policy.policy_no,
+    expectedGain: Number(policy.expected_peak_shaving_gain || policy.expected_revenue_gain || 0),
+    status: policy.status,
+  }));
+  const revenueTrend = revenueRows(revenue.data?.items || [], peakPolicies);
+  const displayGain = forecastPolicies.reduce((sum, item) => sum + item.expectedGain, 0);
   const resourceGain = shavingResources.reduce((sum, item) => sum + item.gain, 0);
 
   async function createRun() {
@@ -123,7 +144,7 @@ export function PeakShavingDashboard() {
   return (
     <>
       <PageHeader eyebrow="Peak Shaving" title="削峰看板" description="按照削峰逻辑展示集群实跑、水位线建议、削峰后资源冗余与收益。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成削峰策略</Button>} />
-      <Spin spinning={policies.loading}>
+      <Spin spinning={policies.loading || resources.loading || clusterTpm.loading || revenue.loading || watchedClusters.loading}>
         <div className="wire-grid page-section peak-grid peak-dashboard-grid">
           <section className="wire-card peak-panel peak-runtime-panel">
             <div className="wire-card-title">集群实跑及建议切量水位线展示</div>
@@ -170,7 +191,7 @@ export function PeakShavingDashboard() {
             <div className="wire-card-title">削峰调整方案预估收益</div>
             <div className="circle-metric peak-gain-metric"><strong>{money(displayGain)}</strong><span>定向搬迁新增收入</span></div>
             <Table size="small" rowKey="date" className="peak-compact-table" dataSource={shavingForecast} pagination={false} scroll={{ x: 'max-content' }} columns={[{ title: '日期', dataIndex: 'date' }, { title: '削峰前 TPM', dataIndex: 'before', render: numberText }, { title: '削峰后 TPM', dataIndex: 'after', render: numberText }, { title: '削峰 TPM', dataIndex: 'shaved', render: numberText }, { title: '削峰前机器台数', dataIndex: 'beforeMachines', render: numberText }, { title: '削峰后机器台数', dataIndex: 'afterMachines', render: numberText }]} />
-            <Table size="small" rowKey="policyNo" className="peak-compact-table peak-policy-table" dataSource={forecastPolicies} pagination={false} onRow={() => ({ onClick: () => peakPolicies[0] && openDetail(peakPolicies[0]) })} columns={[{ title: '策略编号', dataIndex: 'policyNo' }, { title: '预估收益', dataIndex: 'expectedGain', render: money }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} />
+            <Table size="small" rowKey="policyNo" className="peak-compact-table peak-policy-table" dataSource={forecastPolicies} pagination={false} onRow={(record) => ({ onClick: () => { const policy = peakPolicies.find((item) => item.id === record.policyId); if (policy) openDetail(policy); } })} columns={[{ title: '策略编号', dataIndex: 'policyNo' }, { title: '预估收益', dataIndex: 'expectedGain', render: money }, { title: '状态', dataIndex: 'status', render: (value) => <StatusTag value={value} /> }]} />
           </section>
 
           <section className="wire-card peak-panel peak-history-panel">

@@ -1,90 +1,63 @@
 import { Button, Descriptions, Drawer, Form, Input, message, Modal, Select, Space, Spin, Table } from 'antd';
 import { Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusTag } from '../../components/StatusTag';
 import { JsonBlock } from '../../components/JsonBlock';
 import { EmptyState } from '../../components/EmptyState';
-import { policiesApi } from '../../api/kongming';
-import type { Policy, PolicyDetail } from '../../api/types';
+import { dashboardsApi, fittingsApi, policiesApi, revenueApi, watchedClustersApi } from '../../api/kongming';
+import type { FittingResult, Policy, PolicyDetail, ResourceCluster, RevenueAnalysisItem } from '../../api/types';
 import { useAsync } from '../../hooks/useAsync';
 import { dateText, money, numberText } from '../../utils/format';
 import { parseJsonObject } from '../../utils/json';
-
-const clusterOptions = [
-  { label: 'ksyun-glm5.1-qy-10056', value: 'ksyun-glm5.1-qy-10056' },
-  { label: 'ksyun-glm5.1-qy-10057', value: 'ksyun-glm5.1-qy-10057' },
-  { label: 'ksyun-glm5.1-qy-10058', value: 'ksyun-glm5.1-qy-10058' },
-];
-
-const idleRuntimeByCluster: Record<string, Array<{ time: string; dayBefore: number; yesterday: number; forecast: number }>> = {
-  'ksyun-glm5.1-qy-10056': [
-    { time: '00:00', dayBefore: 185000, yesterday: 205000, forecast: 198000 },
-    { time: '01:00', dayBefore: 130000, yesterday: 150000, forecast: 142000 },
-    { time: '02:00', dayBefore: 110000, yesterday: 128000, forecast: 118000 },
-    { time: '03:00', dayBefore: 100000, yesterday: 112000, forecast: 108000 },
-    { time: '04:00', dayBefore: 90000, yesterday: 98000, forecast: 94000 },
-    { time: '05:00', dayBefore: 130000, yesterday: 145000, forecast: 138000 },
-    { time: '06:00', dayBefore: 245000, yesterday: 270000, forecast: 258000 },
-    { time: '07:00', dayBefore: 345000, yesterday: 405000, forecast: 378000 },
-    { time: '08:00', dayBefore: 330000, yesterday: 382000, forecast: 360000 },
-  ],
-  'ksyun-glm5.1-qy-10057': [
-    { time: '00:00', dayBefore: 160000, yesterday: 172000, forecast: 168000 },
-    { time: '01:00', dayBefore: 118000, yesterday: 132000, forecast: 125000 },
-    { time: '02:00', dayBefore: 98000, yesterday: 112000, forecast: 105000 },
-    { time: '03:00', dayBefore: 84000, yesterday: 96000, forecast: 90000 },
-    { time: '04:00', dayBefore: 78000, yesterday: 86000, forecast: 83000 },
-    { time: '05:00', dayBefore: 116000, yesterday: 132000, forecast: 124000 },
-    { time: '06:00', dayBefore: 210000, yesterday: 238000, forecast: 224000 },
-    { time: '07:00', dayBefore: 310000, yesterday: 352000, forecast: 332000 },
-    { time: '08:00', dayBefore: 286000, yesterday: 325000, forecast: 306000 },
-  ],
-  'ksyun-glm5.1-qy-10058': [
-    { time: '00:00', dayBefore: 132000, yesterday: 146000, forecast: 140000 },
-    { time: '01:00', dayBefore: 102000, yesterday: 116000, forecast: 108000 },
-    { time: '02:00', dayBefore: 89000, yesterday: 98000, forecast: 94000 },
-    { time: '03:00', dayBefore: 76000, yesterday: 84000, forecast: 80000 },
-    { time: '04:00', dayBefore: 70000, yesterday: 78000, forecast: 74000 },
-    { time: '05:00', dayBefore: 100000, yesterday: 116000, forecast: 108000 },
-    { time: '06:00', dayBefore: 176000, yesterday: 205000, forecast: 190000 },
-    { time: '07:00', dayBefore: 264000, yesterday: 305000, forecast: 286000 },
-    { time: '08:00', dayBefore: 250000, yesterday: 290000, forecast: 272000 },
-  ],
-};
-
-const redundantMachines = [
-  { cluster: 'Cluster-A', machines: 18 },
-  { cluster: 'Cluster-B', machines: 14 },
-  { cluster: 'Cluster-C', machines: 11 },
-  { cluster: 'Cluster-D', machines: 8 },
-];
+import { isWatchedCluster, watchedClusterNames } from '../../utils/watchedClusters';
 
 const clusterBarColors = ['#27d7ff', '#5dffb2', '#9b8cff', '#6aa7ff'];
 
-const clusterPlans = [
-  { cluster: 'Cluster-A', customer: '客户 1024', move: '夜间批量任务迁入', watermark: '65%', redundant: 18 },
-  { cluster: 'Cluster-B', customer: '客户 2048', move: '三方低优先级流量回收至自建', watermark: '62%', redundant: 14 },
-  { cluster: 'Cluster-C', customer: '客户 3072', move: '闲时训练队列承接新增需求', watermark: '68%', redundant: 11 },
-];
+function timeLabel(value?: string) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 
-const benefitBars = [
-  { day: '06/01', baseGain: 8400, shiftGain: 5600, total: 14000, target: 13600 },
-  { day: '06/02', baseGain: 9500, shiftGain: 6700, total: 16200, target: 16000 },
-  { day: '06/03', baseGain: 11000, shiftGain: 7700, total: 18700, target: 18400 },
-  { day: '06/04', baseGain: 10400, shiftGain: 7500, total: 17900, target: 17600 },
-  { day: '06/05', baseGain: 12200, shiftGain: 6800, total: 19000, target: 19800 },
-];
+function runtimeRows(result?: FittingResult) {
+  return (result?.series_json || []).map(([ts, value], index, arr) => {
+    const forecast = Number(value || 0);
+    const previous = index > 0 ? Number(arr[index - 1]?.[1] || forecast) : forecast;
+    return { time: timeLabel(ts), dayBefore: previous, yesterday: forecast, forecast };
+  });
+}
 
-const revenueTrend = [
-  { day: 'D-6', expected: 1100, actual: 980, gap: -120 },
-  { day: 'D-5', expected: 1600, actual: 1520, gap: -80 },
-  { day: 'D-4', expected: 2100, actual: 2250, gap: 150 },
-  { day: 'D-3', expected: 2500, actual: 2360, gap: -140 },
-  { day: 'D-2', expected: 3100, actual: 2980, gap: -120 },
-  { day: 'D-1', expected: 3600, actual: 3720, gap: 120 },
-  { day: '今日', expected: 4200, actual: 4050, gap: -150 },
-];
+function redundantRow(cluster: ResourceCluster) {
+  return { cluster: cluster.cluster_name, machines: Number(cluster.idle_redundant_machines ?? cluster.current_redundant_machines ?? 0) };
+}
+
+function clusterPlanFromResource(cluster: ResourceCluster) {
+  return {
+    cluster: cluster.cluster_name,
+    customer: cluster.primary_customer || '-',
+    move: cluster.deployed_model,
+    watermark: `${Math.round(Number(cluster.cluster_utilization || 0) * 100)}%`,
+    redundant: Number(cluster.idle_redundant_machines ?? cluster.current_redundant_machines ?? 0),
+  };
+}
+
+function benefitRows(policies: Policy[]) {
+  return policies.slice(0, 7).map((item) => {
+    const total = Number(item.expected_off_peak_gain || item.expected_revenue_gain || 0);
+    return { day: item.policy_no, baseGain: 0, shiftGain: total, total, target: total };
+  });
+}
+
+function revenueRows(items: RevenueAnalysisItem[], policies: Policy[]) {
+  const allowed = new Set(policies.map((item) => item.id));
+  return items.filter((item) => allowed.has(item.policy_id)).slice(-7).map((item) => ({
+    day: item.policy_no,
+    expected: Number(item.expected_revenue_gain || 0),
+    actual: Number(item.actual_revenue_gain || 0),
+    gap: Number(item.revenue_gap || 0),
+  }));
+}
 
 const axisTick = { fill: '#7898a8', fontSize: 12 };
 const tooltipStyle = {
@@ -122,11 +95,28 @@ export function IdleDashboard() {
   const [detail, setDetail] = useState<PolicyDetail | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [selectedCluster, setSelectedCluster] = useState(clusterOptions[0].value);
+  const [selectedCluster, setSelectedCluster] = useState('');
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
+  const resources = useAsync(() => dashboardsApi.resources({}), []);
+  const fitting = useAsync(() => fittingsApi.results({ level: 'cluster', period: 'idle', page_size: 100 }), []);
+  const revenue = useAsync(() => revenueApi.analysis(), []);
+  const watchedClusters = useAsync(() => watchedClustersApi.list(), []);
+  const watchedNames = watchedClusterNames(watchedClusters.data);
+  const resourceClusters = (resources.data?.clusters || []).filter((cluster) => isWatchedCluster(cluster.cluster_name, watchedNames));
+  const fittingItems = (fitting.data?.items || []).filter((item) => isWatchedCluster(item.cluster_name, watchedNames));
   const idlePolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'off_peak'), [policies.data?.items]);
-  const selectedRuntime = idleRuntimeByCluster[selectedCluster] || idleRuntimeByCluster[clusterOptions[0].value];
+  const clusterOptions = useMemo(() => fittingItems.map((item) => ({ label: item.cluster_name || item.model_name, value: item.cluster_name || item.model_name })), [fittingItems]);
+  const selectedFit = fittingItems.find((item) => (item.cluster_name || item.model_name) === selectedCluster) || fittingItems[0];
+  const selectedRuntime = runtimeRows(selectedFit);
+  const redundantMachines = resourceClusters.map(redundantRow).slice(0, 6);
+  const clusterPlans = resourceClusters.map(clusterPlanFromResource).slice(0, 6);
+  const benefitBars = benefitRows(idlePolicies);
+  const revenueTrend = revenueRows(revenue.data?.items || [], idlePolicies);
   const totalGain = benefitBars.reduce((sum, item) => sum + item.total, 0);
+
+  useEffect(() => {
+    if ((!selectedCluster || !clusterOptions.some((option) => option.value === selectedCluster)) && clusterOptions[0]) setSelectedCluster(clusterOptions[0].value);
+  }, [selectedCluster, clusterOptions]);
 
   async function createRun() {
     setSubmitting(true);
@@ -183,7 +173,7 @@ export function IdleDashboard() {
   return (
     <>
       <PageHeader eyebrow="Idle" title="闲时看板" description="展示夜间集群跑量、冗余机器台数、调整建议、收益预估与历史收益偏差。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成闲时策略</Button>} />
-      <Spin spinning={policies.loading}>
+      <Spin spinning={policies.loading || resources.loading || fitting.loading || revenue.loading || watchedClusters.loading}>
         <div className="idle-dashboard-grid page-section">
           <section className="wire-card dashboard-panel-wide idle-runtime-card">
             <div className="idle-card-head">

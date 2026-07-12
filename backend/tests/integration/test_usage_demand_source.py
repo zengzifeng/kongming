@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from app.algorithms.usage_demand_source import build_usage_demand_items
 from app.extensions import db
-from app.models import ClusterResource, Customer, CustomerSellDiscount, CustomerUsageHourly
+from app.models import ClusterResource, MonitorConsumer, CustomerSellDiscount, CustomerUsageHourly
 
 
 def _usage(cust_id, model, dt, io, ti, ot, ct, cmt, source, provider):
@@ -18,8 +18,8 @@ def _usage(cust_id, model, dt, io, ti, ot, ct, cmt, source, provider):
 
 
 def _seed(app):
-    signed = Customer(customer_code="C0100", name="签约客户", level="B")
-    unsigned = Customer(customer_code="C0101", name="未签客户", level="B")
+    signed = MonitorConsumer(ai_consumer="签约客户", customer_code="C0100", customer_name="签约客户", level="B")
+    unsigned = MonitorConsumer(ai_consumer="未签客户", customer_code="C0101", customer_name="未签客户", level="B")
     db.session.add_all([signed, unsigned])
     db.session.flush()
 
@@ -91,7 +91,7 @@ def _cluster(name, model, provider):
 
 def _seed_whitelist(app):
     """一个客户的 glm-5.1：真自建(白名单内 provider) + 错挂自建(白名单外 provider) + 三方。"""
-    cust = Customer(customer_code="C0200", name="混跑客户", level="B")
+    cust = MonitorConsumer(ai_consumer="混跑客户", customer_code="C0200", customer_name="混跑客户", level="B")
     db.session.add(cust)
     db.session.flush()
     t = datetime(2026, 7, 7, 11, 0, 0)

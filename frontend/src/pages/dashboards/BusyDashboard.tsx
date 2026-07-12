@@ -5,44 +5,57 @@ import { PageHeader } from '../../components/PageHeader';
 import { StatusTag } from '../../components/StatusTag';
 import { JsonBlock } from '../../components/JsonBlock';
 import { EmptyState } from '../../components/EmptyState';
-import { policiesApi } from '../../api/kongming';
-import type { Policy, PolicyDetail } from '../../api/types';
+import { dashboardsApi, fittingsApi, policiesApi, revenueApi, watchedClustersApi } from '../../api/kongming';
+import type { FittingResult, Policy, PolicyDetail, ResourceCluster, RevenueAnalysisItem } from '../../api/types';
 import { useAsync } from '../../hooks/useAsync';
 import { dateText, money, numberText } from '../../utils/format';
 import { parseJsonObject } from '../../utils/json';
-
-const dayRuntime = [
-  { time: '09:00', clusterA: 620, clusterB: 540, clusterC: 480, fit: 600 },
-  { time: '11:00', clusterA: 780, clusterB: 690, clusterC: 610, fit: 740 },
-  { time: '13:00', clusterA: 820, clusterB: 720, clusterC: 660, fit: 790 },
-  { time: '15:00', clusterA: 700, clusterB: 640, clusterC: 590, fit: 680 },
-  { time: '18:00', clusterA: 540, clusterB: 500, clusterC: 430, fit: 520 },
-];
-
-const redundantMachines = [
-  { cluster: 'Cluster-A', machines: 7 },
-  { cluster: 'Cluster-B', machines: 5 },
-  { cluster: 'Cluster-C', machines: 4 },
-  { cluster: 'Cluster-D', machines: 3 },
-];
+import { isWatchedCluster, watchedClusterNames } from '../../utils/watchedClusters';
 
 const clusterBarColors = ['#27d7ff', '#5dffb2', '#9b8cff', '#6aa7ff'];
 
-const clusterPlans = [
-  { cluster: 'Cluster-A', customer: '客户 4096', move: '高峰期低优先级任务外溢至三方', watermark: '78%', redundant: 7 },
-  { cluster: 'Cluster-B', customer: '客户 5120', move: '保留实时推理水位并压缩批量队列', watermark: '82%', redundant: 5 },
-  { cluster: 'Cluster-C', customer: '客户 6144', move: '热点模型独占队列与容量预留', watermark: '80%', redundant: 4 },
-];
+function timeLabel(value?: string) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 
-const revenueTrend = [
-  { day: 'D-6', expected: 900, actual: 860, gap: -40 },
-  { day: 'D-5', expected: 1300, actual: 1420, gap: 120 },
-  { day: 'D-4', expected: 1700, actual: 1650, gap: -50 },
-  { day: 'D-3', expected: 2200, actual: 2100, gap: -100 },
-  { day: 'D-2', expected: 2600, actual: 2720, gap: 120 },
-  { day: 'D-1', expected: 3000, actual: 2860, gap: -140 },
-  { day: '今日', expected: 3500, actual: 3420, gap: -80 },
-];
+function buildRuntimeRows(results: FittingResult[]) {
+  const rows: Record<string, string | number>[] = [];
+  results.slice(0, 3).forEach((result, resultIndex) => {
+    const key = `cluster${String.fromCharCode(65 + resultIndex)}`;
+    (result.series_json || []).forEach(([ts, value], pointIndex) => {
+      const row = rows[pointIndex] || { time: timeLabel(ts) };
+      row[key] = Number(value || 0);
+      rows[pointIndex] = row;
+    });
+  });
+  return rows.map((row) => ({ ...row, fit: Math.round((Number(row.clusterA || 0) + Number(row.clusterB || 0) + Number(row.clusterC || 0)) / 3) }));
+}
+
+function redundantRow(cluster: ResourceCluster) {
+  return { cluster: cluster.cluster_name, machines: Number(cluster.busy_redundant_machines ?? cluster.current_redundant_machines ?? 0) };
+}
+
+function clusterPlanFromResource(cluster: ResourceCluster) {
+  return {
+    cluster: cluster.cluster_name,
+    customer: cluster.primary_customer || '-',
+    move: cluster.deployed_model,
+    watermark: `${Math.round(Number(cluster.cluster_utilization || 0) * 100)}%`,
+    redundant: Number(cluster.busy_redundant_machines ?? cluster.current_redundant_machines ?? 0),
+  };
+}
+
+function revenueRows(items: RevenueAnalysisItem[], policies: Policy[]) {
+  const allowed = new Set(policies.map((item) => item.id));
+  return items.filter((item) => allowed.has(item.policy_id)).slice(-7).map((item) => ({
+    day: item.policy_no,
+    expected: Number(item.expected_revenue_gain || 0),
+    actual: Number(item.actual_revenue_gain || 0),
+    gap: Number(item.revenue_gap || 0),
+  }));
+}
 
 function pickPolicies(policies: Policy[], key: string) {
   return policies.filter((item) => item.algorithm === key || JSON.stringify(item.summary_json || {}).includes(key));
@@ -55,10 +68,19 @@ export function BusyDashboard() {
   const [editOpen, setEditOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
+  const resources = useAsync(() => dashboardsApi.resources({}), []);
+  const fitting = useAsync(() => fittingsApi.results({ level: 'cluster', period: 'busy', page_size: 100 }), []);
+  const revenue = useAsync(() => revenueApi.analysis(), []);
+  const watchedClusters = useAsync(() => watchedClustersApi.list(), []);
+  const watchedNames = watchedClusterNames(watchedClusters.data);
+  const resourceClusters = (resources.data?.clusters || []).filter((cluster) => isWatchedCluster(cluster.cluster_name, watchedNames));
+  const fittingItems = (fitting.data?.items || []).filter((item) => isWatchedCluster(item.cluster_name, watchedNames));
   const busyPolicies = useMemo(() => pickPolicies(policies.data?.items || [], 'off_peak'), [policies.data?.items]);
-  const revenueBars = busyPolicies.length
-    ? busyPolicies.map((item) => ({ name: item.policy_no, gain: Number(item.expected_revenue_gain || 0) }))
-    : [{ name: 'POL-OFFPEAK-0627B', gain: 132000 }];
+  const dayRuntime = buildRuntimeRows(fittingItems);
+  const redundantMachines = resourceClusters.map(redundantRow).slice(0, 6);
+  const clusterPlans = resourceClusters.map(clusterPlanFromResource).slice(0, 6);
+  const revenueBars = busyPolicies.map((item) => ({ name: item.policy_no, gain: Number(item.expected_revenue_gain || 0) }));
+  const revenueTrend = revenueRows(revenue.data?.items || [], busyPolicies);
   const totalGain = revenueBars.reduce((sum, item) => sum + item.gain, 0);
 
   async function createRun() {
@@ -116,7 +138,7 @@ export function BusyDashboard() {
   return (
     <>
       <PageHeader eyebrow="Busy" title="忙时看板" description="展示白天集群跑量、冗余机器台数、调整建议、收益预估与历史收益偏差。" actions={<Button type="primary" onClick={() => setCreateOpen(true)}>生成忙时策略</Button>} />
-      <Spin spinning={policies.loading}>
+      <Spin spinning={policies.loading || resources.loading || fitting.loading || revenue.loading || watchedClusters.loading}>
         <div className="busy-board page-section">
           <section className="wire-card busy-panel">
             <div className="wire-card-title">集群维度白天跑量</div>

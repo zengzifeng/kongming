@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from ..extensions import db
-from ..models import Customer, Demand, RawFiling
+from ..models import MonitorConsumer, Demand, RawFiling
 from ..models.demand import DemandStatus, VALID_TRANSITIONS
 from ..utils.errors import NotFound, StateConflict, ValidationFailed
 from ..utils.time import utcnow
@@ -54,18 +54,20 @@ class DemandService:
         demand.field_completeness_score = completeness
         return "updated"
 
-    def _ensure_customer(self, payload: dict) -> Customer | None:
+    def _ensure_customer(self, payload: dict) -> MonitorConsumer | None:
         code = payload.get("customer_code")
         if not code:
             return None
         customer = db.session.execute(
-            select(Customer).where(Customer.customer_code == code)
+            select(MonitorConsumer).where(MonitorConsumer.customer_code == code)
         ).scalar_one_or_none()
         if customer:
             return customer
-        customer = Customer(
+        name = payload.get("customer_name", code)
+        customer = MonitorConsumer(
+            ai_consumer=name,
             customer_code=code,
-            name=payload.get("customer_name", code),
+            customer_name=name,
             level=payload.get("customer_level", "B"),
         )
         db.session.add(customer)

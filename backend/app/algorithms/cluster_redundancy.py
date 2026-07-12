@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from ..extensions import db
-from ..models import ClusterResource, Customer, CustomerUsageHourly
+from ..models import ClusterResource, MonitorConsumer, CustomerUsageHourly
 
 SELF_SOURCE = "自建"
 
@@ -72,7 +72,7 @@ def apply_current_redundancy(clusters: list[dict], exclude_customer_codes=None) 
     excluded_ids: set[int] = set()
     if exclude_codes:
         excluded_ids = {
-            c.id for c in db.session.execute(db.select(Customer)).scalars()
+            c.id for c in db.session.execute(db.select(MonitorConsumer)).scalars()
             if c.customer_code in exclude_codes
         }
 

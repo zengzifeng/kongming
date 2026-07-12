@@ -34,6 +34,55 @@ def _prepare_policy(client):
     return run_id, policies[0]["id"]
 
 
+def test_dashboard_operations_contract(client):
+    res = client.get("/api/v1/dashboard/operations")
+    assert res.status_code == 200, res.json
+    data = res.json["data"]
+    assert "pending_demands" in data
+    assert "pending_evaluations" in data
+    assert "draft_policies" in data
+    assert "open_alerts" in data
+    assert "revenue_last_24h" in data
+
+
+def test_revenue_dashboard_contract(client):
+    res = client.get("/api/v1/revenue/dashboard")
+    assert res.status_code == 200, res.json
+    data = res.json["data"]
+    assert "generated_at" in data
+    assert isinstance(data["idle"], list)
+    assert isinstance(data["busy"], list)
+    assert isinstance(data["peak_shaving"], list)
+
+
+def test_watched_clusters_crud_contract(client):
+    res = client.get("/api/v1/watched-clusters")
+    assert res.status_code == 200, res.json
+    items = res.json["data"]
+    assert "DeepSeek-V3.2" in {item["cluster_name"] for item in items}
+
+    res = client.post("/api/v1/watched-clusters", json={"cluster_name": "contract-cluster", "sort_order": 99})
+    assert res.status_code == 201, res.json
+    created = res.json["data"]
+    assert created["cluster_name"] == "contract-cluster"
+    assert created["enabled"] is True
+
+    res = client.patch(f"/api/v1/watched-clusters/{created['id']}", json={"enabled": False})
+    assert res.status_code == 200, res.json
+    assert res.json["data"]["enabled"] is False
+
+    res = client.get("/api/v1/watched-clusters")
+    assert res.status_code == 200, res.json
+    assert "contract-cluster" not in {item["cluster_name"] for item in res.json["data"]}
+
+    res = client.get("/api/v1/watched-clusters?include_disabled=true")
+    assert res.status_code == 200, res.json
+    assert "contract-cluster" in {item["cluster_name"] for item in res.json["data"]}
+
+    res = client.delete(f"/api/v1/watched-clusters/{created['id']}")
+    assert res.status_code == 200, res.json
+
+
 def test_dashboard_resources_contract(client):
     res = client.get("/api/v1/dashboard/resources?gpu_model=qwen&datacenter=bj")
     assert res.status_code == 200, res.json

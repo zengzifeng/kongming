@@ -13,7 +13,7 @@ from ..repositories import (
 )
 from ..schemas.common import model_to_dict
 from ..schemas.revenue_schema import AlertPatch, RevenueAnalysisArchiveRequest
-from ..services import CustomerTrackingService, PolicyService, RevenueAnalysisService
+from ..services import CustomerTrackingService, PolicyService, RevenueAnalysisService, RevenueService
 from ..services.alert_service import AlertService
 from ..utils.errors import NotFound, ValidationFailed
 from ..utils.pagination import parse_pagination
@@ -33,6 +33,11 @@ def list_attributions():
         page=page, page_size=page_size,
     )
     return paginated([model_to_dict(a) for a in items], page, page_size, total)
+
+
+@bp.get("/revenue/dashboard")
+def revenue_dashboard():
+    return success(RevenueService().dashboard())
 
 
 @bp.get("/revenue/analysis")

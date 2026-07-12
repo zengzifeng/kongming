@@ -11,6 +11,7 @@ from .vendors import bp as vendors_bp
 from .jobs import bp as jobs_bp
 from .monitor import bp as monitor_bp
 from .fittings import bp as fittings_bp
+from .watched_clusters import bp as watched_clusters_bp
 from .docs import bp as api_docs_bp, OPENAPI_SPEC_ROUTE
 
 
@@ -32,6 +33,7 @@ def register_blueprints(app: Flask):
     app.register_blueprint(jobs_bp, url_prefix=V1_PREFIX)
     app.register_blueprint(monitor_bp, url_prefix=V1_PREFIX)
     app.register_blueprint(fittings_bp, url_prefix=V1_PREFIX)
+    app.register_blueprint(watched_clusters_bp, url_prefix=V1_PREFIX)
 
     # API 文档：规范原文（根路径 /openapi.yaml）+ Swagger UI（/apidocs）。
     app.register_blueprint(api_docs_bp)

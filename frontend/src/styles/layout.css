@@ -981,9 +981,45 @@
 .realtime-panel .ant-table-tbody > tr:hover > td { background: rgba(22, 77, 118, .78) !important; }
 .realtime-total-row > td { font-weight: 800; }
 .realtime-cell-number { width: 96px; }
+.cluster-tpm-value-button {
+  min-width: 72px;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid rgba(82, 191, 255, .32);
+  border-radius: 8px;
+  color: #d8f5ff;
+  background: rgba(13, 58, 94, .72);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 24px;
+  text-align: center;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.cluster-tpm-value-button:disabled { cursor: wait; opacity: .68; }
+.cluster-tpm-editor {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+}
 .cluster-tpm-editor .realtime-cell-number { width: 72px; }
 .cluster-tpm-editor .ant-input-number-small { height: 24px; }
+.cluster-tpm-confirm {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  color: #5dffb2;
+  border: 1px solid rgba(93, 255, 178, .24);
+  border-radius: 8px;
+  background: rgba(14, 78, 61, .36);
+}
+.cluster-tpm-confirm:hover { color: #b8ffdd !important; border-color: rgba(93, 255, 178, .48) !important; }
 .cluster-capacity-chart {
+
   height: 330px;
   min-width: 0;
   padding: 8px 0 0;

@@ -39,7 +39,7 @@ class CustomerUsageHourly(BaseModel):
     )
 
     # 归属客户（FK -> customers），并冗余客户名以便追溯原始导出
-    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("monitor_consumers.id"), nullable=False)
     customer_name: Mapped[str] = mapped_column(String(128), nullable=False)
 
     # 账号维度

@@ -9,8 +9,9 @@ import { StatusTag } from '../../components/StatusTag';
 
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorState } from '../../components/ErrorState';
-import { evaluationsApi, policiesApi } from '../../api/kongming';
-import type { Evaluation, Policy, PolicyDetail } from '../../api/types';
+import { evaluationsApi, fittingsApi, jobsApi, policiesApi } from '../../api/kongming';
+import type { Evaluation, FittingConfig, JobSchedule, Policy, PolicyDetail } from '../../api/types';
+
 import { useAsync } from '../../hooks/useAsync';
 import { money, numberText, percent } from '../../utils/format';
 
@@ -111,77 +112,6 @@ const scheduledTaskStatusLabels: Record<string, string> = {
   failed: '异常',
 };
 
-const scheduledTasks: ScheduledTask[] = [
-  { id: 'task-demand-evaluation-hourly', taskName: '需求评估策略生成', algorithm: 'demand_evaluation', frequency: '每小时', executeTime: '整点 + 05 分', status: 'running' },
-  { id: 'task-idle-rebalance-nightly', taskName: '闲时策略定时重算', algorithm: 'time_period', frequency: '每日', executeTime: '00:10', status: 'scheduled' },
-  { id: 'task-busy-rebalance-rolling', taskName: '忙时策略滚动评估', algorithm: 'time_period', frequency: '每 30 分钟', executeTime: '09:00-21:00', status: 'running' },
-  { id: 'task-revenue-attribution-check', taskName: '策略效果回写校验', algorithm: 'revenue_attribution', frequency: '每日', executeTime: '23:30', status: 'paused' },
-];
-
-const initialFittingStrategies: FittingStrategy[] = [
-  { id: 'fit-mihoyo-kimi', customerName: '米哈游热点推理', modelName: 'kimi-k2.5', fittingAlgorithm: 'piecewise_linear', manualParams: 'alpha=0.82; cap=6000万' },
-  { id: 'fit-glm-pool', customerName: 'GLM-5.1 高峰客户池', modelName: 'glm-5.1', fittingAlgorithm: 'quantile_regression', manualParams: 'p95=5200万; smooth=0.15' },
-  { id: 'fit-edu-batch', customerName: '教育批处理任务', modelName: 'glm-5.1', fittingAlgorithm: 'low_peak_spline', manualParams: 'window=00:00-07:00; cap=1860万' },
-];
-
-const idlePlans: StrategyPlan[] = [
-  {
-    id: 'idle-rebalance-0712',
-    kind: 'idle',
-    title: '闲时算力回收与低优任务迁入',
-    subtitle: '把 00:00-07:00 的空闲自建容量优先承接批处理与训练队列，释放白天三方成本压力。',
-    policyNo: 'POL-OFFPEAK-0627B',
-    window: '00:00-07:00',
-    expectedGain: 132000,
-    status: 'accepted',
-    flows: [
-      { source: 'GLM-5.2 空闲池', sourceModel: 'glm-5.2', sourceRate: '200w/台', sourceMachinesBefore: 42, sourceMachinesAfter: 34, sourceUtilizationBefore: 0.38, sourceUtilizationAfter: 0.54, machines: 8, target: '教育批处理队列', targetModel: 'glm-5.1', targetRate: '260w/台', targetMachinesBefore: 8, targetMachinesAfter: 16, targetUtilizationBefore: 0.43, targetUtilizationAfter: 0.61, gain: 76000 },
-      { source: '低峰共享池', sourceModel: 'kimi-k2.5', sourceRate: '250w/台', sourceMachinesBefore: 30, sourceMachinesAfter: 24, sourceUtilizationBefore: 0.41, sourceUtilizationAfter: 0.58, machines: 6, target: '训练队列承接', targetModel: 'kimi-k2.6', targetRate: '300w/台', targetMachinesBefore: 4, targetMachinesAfter: 10, targetUtilizationBefore: 0.64, targetUtilizationAfter: 0.72, gain: 43000 },
-      { source: 'Embedding 余量', sourceModel: 'embedding', sourceRate: '120w/台', sourceMachinesBefore: 22, sourceMachinesAfter: 18, sourceUtilizationBefore: 0.36, sourceUtilizationAfter: 0.51, machines: 4, target: '低优召回任务', targetModel: 'glm-5.2', targetRate: '200w/台', targetMachinesBefore: 34, targetMachinesAfter: 38, targetUtilizationBefore: 0.54, targetUtilizationAfter: 0.57, gain: 13000 },
-    ],
-    attributions: [
-      { customer: '教育批处理任务', model: 'glm-5.1', density: 0.0318, beforeRatio: 0.42, afterRatio: 0.84, watermarkBefore: 9300000, watermark: 18600000, beforeVolume: 238.6, afterVolume: 477.4, deltaVolume: 238.8, gain: 76000, fallback: '百度三方', series: [820, 760, 690, 620, 570, 590, 710, 980, 1380, 1560, 1480, 1320, 1180, 1220, 1280, 1360, 1420, 1490, 1540, 1320, 1120, 960, 880, 840].map((v) => v * 10000) },
-      { customer: '训练队列承接', model: 'kimi-k2.6', density: 0.0244, beforeRatio: 0.35, afterRatio: 0.70, watermarkBefore: 6550000, watermark: 13100000, beforeVolume: 176.0, afterVolume: 352.0, deltaVolume: 176.0, gain: 43000, fallback: '月暗原厂', series: [520, 540, 610, 720, 840, 920, 850, 720, 620, 580, 560, 590, 630, 680, 720, 760, 810, 890, 940, 880, 760, 650, 590, 540].map((v) => v * 10000) },
-    ],
-    utilRows: [
-      { cluster: 'GLM-5.2', model: 'glm-5.2', capacityBefore: '8,160w', capacityAfter: '6,560w', utilizationBefore: 0.38, utilizationAfter: 0.54 },
-      { cluster: 'GLM-5.1-FP8', model: 'glm-5.1', capacityBefore: '2,080w', capacityAfter: '3,640w', utilizationBefore: 0.43, utilizationAfter: 0.61 },
-      { cluster: 'kimi-k2.6-mihayou', model: 'kimi-k2.6', capacityBefore: '1,200w', capacityAfter: '1,500w', utilizationBefore: 1.0, utilizationAfter: 0.87 },
-    ],
-    detailLead: '闲时策略以低峰窗口内的空闲自建容量为预算，优先把高毛利、低时效任务切回自建，同时保留白天峰值保护。',
-  },
-];
-
-const busyPlans: StrategyPlan[] = [
-  {
-    id: 'busy-rebalance-0712',
-    kind: 'busy',
-    title: '机器腾挪流向（源模型富余 -> 目标模型紧缺）',
-    subtitle: '跨模型重分配 23 台机器，把富余模型容量挪给紧缺模型，并同步调整客户切量水位线。',
-    policyNo: 'POL-BUSY-0712A',
-    window: '09:00-21:00',
-    expectedGain: 34902,
-    status: 'draft',
-    flows: [
-      { source: 'GLM-5.2', sourceModel: 'glm-5.2', sourceRate: '200w/台', sourceMachinesBefore: 41, sourceMachinesAfter: 31, sourceUtilizationBefore: 0.38, sourceUtilizationAfter: 0.82, machines: 10, target: 'kimi-k2.5-nvfp4-mihayou', targetModel: 'kimi-k2.5', targetRate: '250w/台', targetMachinesBefore: 14, targetMachinesAfter: 24, targetUtilizationBefore: 1.0, targetUtilizationAfter: 1.0, gain: 17576 },
-      { source: 'GLM-5.2', sourceModel: 'glm-5.2', sourceRate: '200w/台', sourceMachinesBefore: 31, sourceMachinesAfter: 19, sourceUtilizationBefore: 0.82, sourceUtilizationAfter: 0.93, machines: 12, target: 'GLM-5.1-FP8', targetModel: 'glm-5.1', targetRate: '260w/台', targetMachinesBefore: 8, targetMachinesAfter: 20, targetUtilizationBefore: 1.0, targetUtilizationAfter: 1.0, gain: 16643 },
-      { source: 'GLM-5.1-KSCC', sourceModel: 'glm-5.1', sourceRate: '700w/台', sourceMachinesBefore: 7, sourceMachinesAfter: 6, sourceUtilizationBefore: 0.91, sourceUtilizationAfter: 0.88, machines: 1, target: 'kimi-k2.6-mihayou', targetModel: 'kimi-k2.6', targetRate: '300w/台', targetMachinesBefore: 4, targetMachinesAfter: 5, targetUtilizationBefore: 1.0, targetUtilizationAfter: 0.87, gain: 683 },
-    ],
-    attributions: [
-      { customer: '米哈游热点推理', model: 'kimi-k2.5', density: 0.0293, beforeRatio: 0.53, afterRatio: 0.80, watermarkBefore: 45000000, watermark: 60000000, beforeVolume: 119.9, afterVolume: 179.9, deltaVolume: 60.0, gain: 17576, fallback: '月暗原厂', series: [3200, 3500, 3800, 4200, 4600, 5100, 5600, 6100, 6500, 6800, 6630, 6400, 6200, 6500, 6700, 6900, 7100, 7350, 7600, 7200, 6800, 6100, 5200, 4300].map((v) => v * 10000) },
-      { customer: 'GLM-5.1 高峰客户池', model: 'glm-5.1', density: 0.0267, beforeRatio: 0.43, afterRatio: 0.65, watermarkBefore: 36000000, watermark: 52000000, beforeVolume: 124.8, afterVolume: 187.2, deltaVolume: 62.4, gain: 16643, fallback: '百度三方', series: [2800, 3000, 3300, 3700, 4200, 4600, 5010, 5400, 5780, 6200, 5900, 5600, 5300, 5500, 5750, 5900, 6100, 6220, 6080, 5700, 5200, 4700, 3900, 3200].map((v) => v * 10000) },
-      { customer: '珠海办公与 BODHIMIND', model: 'kimi-k2.6', density: 0.0159, beforeRatio: 0.91, afterRatio: 1.0, watermarkBefore: 11800000, watermark: 13100000, beforeVolume: 39.9, afterVolume: 44.2, deltaVolume: 4.3, gain: 683, fallback: '月暗原厂', series: [420, 480, 560, 680, 820, 930, 870, 760, 690, 720, 780, 840, 910, 1040, 1160, 1280, 1310, 1220, 1080, 920, 760, 620, 510, 450].map((v) => v * 10000) },
-    ],
-    utilRows: [
-      { cluster: 'GLM-5.2', model: 'glm-5.2', capacityBefore: '8,160w', capacityAfter: '3,760w', utilizationBefore: 0.38, utilizationAfter: 0.82 },
-      { cluster: 'kimi-k2.5-nvfp4-mihayou', model: 'kimi-k2.5', capacityBefore: '3,500w', capacityAfter: '6,000w', utilizationBefore: 1.0, utilizationAfter: 1.0 },
-      { cluster: 'GLM-5.1-FP8', model: 'glm-5.1', capacityBefore: '2,080w', capacityAfter: '5,200w', utilizationBefore: 1.0, utilizationAfter: 1.0 },
-      { cluster: 'kimi-k2.6-mihayou', model: 'kimi-k2.6', capacityBefore: '1,200w', capacityAfter: '1,500w', utilizationBefore: 1.0, utilizationAfter: 0.87 },
-    ],
-    detailLead: '忙时策略只在峰值可承接且整体收入净增时执行机器腾挪，收益通过抬高客户可用自建容量和切量水位线兑现。',
-  },
-];
-
 
 function policyText(policy: Policy) {
   return `${policy.algorithm} ${policy.policy_no} ${JSON.stringify(policy.summary_json || {})}`;
@@ -191,6 +121,53 @@ function summaryField(policy: Policy, key: string) {
   const value = policy.summary_json?.[key];
   return typeof value === 'string' ? value : '';
 }
+
+function arrayField(source: Record<string, unknown> | undefined, key: string): Record<string, unknown>[] {
+  const value = source?.[key];
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null) : [];
+}
+
+function objectField(source: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  const value = source?.[key];
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function taskStatus(schedule: JobSchedule) {
+  if (!schedule.enabled) return 'paused';
+  return schedule.last_run_at ? 'running' : 'scheduled';
+}
+
+function taskFrequency(schedule: JobSchedule) {
+  if (schedule.trigger_type === 'interval' && schedule.interval_seconds) return `每 ${Math.round(schedule.interval_seconds / 60)} 分钟`;
+  if (schedule.trigger_type === 'cron' && schedule.cron_expr) return 'Cron';
+  return schedule.trigger_type;
+}
+
+function taskExecuteTime(schedule: JobSchedule) {
+  return schedule.next_run_at || schedule.cron_expr || (schedule.interval_seconds ? `${schedule.interval_seconds}s` : '-');
+}
+
+function scheduledTaskFromJob(schedule: JobSchedule): ScheduledTask {
+  return {
+    id: schedule.job_name,
+    taskName: schedule.description || schedule.job_name,
+    algorithm: schedule.job_name,
+    frequency: taskFrequency(schedule),
+    executeTime: taskExecuteTime(schedule),
+    status: taskStatus(schedule),
+  };
+}
+
+function fittingStrategyFromConfig(config: FittingConfig): FittingStrategy {
+  return {
+    id: String(config.id),
+    customerName: config.customer_code,
+    modelName: config.model_name,
+    fittingAlgorithm: config.algo_name,
+    manualParams: JSON.stringify(config.params_json || {}),
+  };
+}
+
 
 function isIdlePolicy(policy: Policy) {
   const text = policyText(policy);
@@ -237,7 +214,96 @@ const demandEvaluationStatusLabels: Record<string, string> = {
   rejected: '驳回',
 };
 
+function flowFromMove(move: Record<string, unknown>, policy: Policy, index: number): StrategyFlow {
+  const summary = policy.summary_json || {};
+  const machinesBefore = objectField(summary, 'machines_before');
+  const machinesAfter = objectField(summary, 'machines_after');
+  const source = stringField(move, 'from_cluster', '源集群');
+  const target = stringField(move, 'to_cluster', '目标集群');
+  const sourceMachinesBefore = numberField(machinesBefore, source);
+  const sourceMachinesAfter = numberField(machinesAfter, source, Math.max(sourceMachinesBefore - numberField(move, 'machine_count'), 0));
+  const targetMachinesBefore = numberField(machinesBefore, target);
+  const targetMachinesAfter = numberField(machinesAfter, target, targetMachinesBefore + numberField(move, 'machine_count'));
+  return {
+    source,
+    sourceModel: stringField(move, 'from_model', stringField(move, 'source_model', '-')),
+    sourceRate: `${formatTpm(numberField(move, 'from_tpm_per_machine'))}/台`,
+    sourceMachinesBefore,
+    sourceMachinesAfter,
+    sourceUtilizationBefore: 0,
+    sourceUtilizationAfter: 0,
+    target,
+    targetModel: stringField(move, 'model', stringField(move, 'to_model', '-')),
+    targetRate: `${formatTpm(numberField(move, 'to_tpm_per_machine'))}/台`,
+    targetMachinesBefore,
+    targetMachinesAfter,
+    targetUtilizationBefore: 0,
+    targetUtilizationAfter: 0,
+    machines: numberField(move, 'machine_count', 1),
+    gain: numberField(move, 'gain_yuan_day', numberField(move, 'gain', Number(policy.expected_revenue_gain || 0) / Math.max(index + 1, 1))),
+  };
+}
+
+function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, index: number): StrategyAttribution {
+  const before = numberField(row, 'watermark_before', numberField(row, 'before_watermark'));
+  const after = numberField(row, 'watermark_after', numberField(row, 'watermark', before));
+  const delta = numberField(row, 'delta', after - before);
+  const gain = numberField(row, 'gain_yuan_day', Number(policy.expected_revenue_gain || 0) / Math.max(index + 1, 1));
+  const base = Math.max(before, after, 1);
+  return {
+    customer: stringField(row, 'customer', stringField(row, 'customer_code', stringField(row, 'report_id', '-'))),
+    model: stringField(row, 'model', stringField(row, 'model_name', '-')),
+    density: delta ? gain / Math.abs(delta) : 0,
+    beforeRatio: before / base,
+    afterRatio: after / base,
+    watermarkBefore: before,
+    watermark: after,
+    beforeVolume: before / 10000,
+    afterVolume: after / 10000,
+    deltaVolume: delta / 10000,
+    gain,
+    fallback: stringField(row, 'fallback', stringField(row, 'reason', '-')),
+    series: Array.from({ length: 24 }, () => Math.max(before, after)),
+  };
+}
+
+function utilRowsFromPolicy(policy: Policy): StrategyUtilRow[] {
+  const rb = objectField(policy.summary_json, 'model_rebalance');
+  const clusters = arrayField(rb, 'per_cluster');
+  return clusters.map((cluster) => ({
+    cluster: stringField(cluster, 'cluster_name', '-'),
+    model: stringField(cluster, 'model', '-'),
+    capacityBefore: `${numberText(numberField(cluster, 'machines_before') * numberField(cluster, 'rate') / 10000)}w`,
+    capacityAfter: `${numberText(numberField(cluster, 'machines_after') * numberField(cluster, 'rate') / 10000)}w`,
+    utilizationBefore: 0,
+    utilizationAfter: 0,
+  }));
+}
+
+function timePeriodPlanFromPolicy(policy: Policy, kind: Extract<StrategyPlanKind, 'idle' | 'busy'>): StrategyPlan {
+  const summary = policy.summary_json || {};
+  const rb = objectField(summary, 'model_rebalance');
+  const moves = [...arrayField(summary, 'node_moves'), ...arrayField(rb, 'moves')];
+  const watermarkChanges = [...arrayField(summary, 'watermark_changes'), ...arrayField(rb, 'customer_watermark_delta'), ...arrayField(summary, 'accepted_customers')];
+  const expectedGain = kind === 'idle' ? Number(policy.expected_off_peak_gain || policy.expected_revenue_gain || 0) : Number(policy.expected_revenue_gain || 0);
+  return {
+    id: `${kind}-${policy.id}`,
+    kind,
+    title: stringField(summary, 'title', kind === 'idle' ? '闲时策略方案' : '忙时策略方案'),
+    subtitle: stringField(summary, 'description', stringField(summary, 'reason', '')),
+    policyNo: policy.policy_no,
+    window: stringField(summary, 'window', kind === 'idle' ? '闲时窗口' : '忙时窗口'),
+    expectedGain,
+    status: policy.status,
+    flows: moves.map((move, index) => flowFromMove(move, policy, index)),
+    attributions: watermarkChanges.map((row, index) => attributionFromWatermark(row, policy, index)),
+    utilRows: utilRowsFromPolicy(policy),
+    detailLead: kind === 'idle' ? '闲时策略来自后端时段策略摘要。' : '忙时策略来自后端时段策略摘要。',
+  };
+}
+
 function demandEvaluationPlanFromPolicy(policy: Policy, evaluation?: Evaluation): StrategyPlan {
+
   const summary = policy.summary_json || {};
   const actionPayload = {
     demand_id: numberField(summary, 'demand_id'),
@@ -478,18 +544,23 @@ function FittingStrategyModule({ strategies, onChange }: FittingStrategyModulePr
 interface ScheduledTaskModuleProps {
   tasks: ScheduledTask[];
   onChange: (tasks: ScheduledTask[]) => void;
+  onSaveTask?: (task: ScheduledTask) => void;
 }
 
-function ScheduledTaskModule({ tasks, onChange }: ScheduledTaskModuleProps) {
+function ScheduledTaskModule({ tasks, onChange, onSaveTask }: ScheduledTaskModuleProps) {
+
   const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const nextTask = tasks.find((task) => task.status === 'scheduled') || tasks[0];
 
   function saveTask(values: Omit<ScheduledTask, 'id'>) {
     if (!editingTask) return;
-    onChange(tasks.map((task) => task.id === editingTask.id ? { ...task, ...values } : task));
+    const nextTask = { ...editingTask, ...values };
+    onChange(tasks.map((task) => task.id === editingTask.id ? nextTask : task));
+    onSaveTask?.(nextTask);
     setEditingTask(null);
   }
+
 
   function addTask() {
     onChange([
@@ -756,27 +827,41 @@ export function StrategyDashboard() {
   const [detail, setDetail] = useState<PolicyDetail | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [taskRows, setTaskRows] = useState<ScheduledTask[]>(scheduledTasks);
-  const [fittingStrategies, setFittingStrategies] = useState<FittingStrategy[]>(initialFittingStrategies);
+  const [taskRows, setTaskRows] = useState<ScheduledTask[]>([]);
+  const [fittingStrategies, setFittingStrategies] = useState<FittingStrategy[]>([]);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
   const demandPolicyList = useAsync(() => policiesApi.list({ page: 1, page_size: 50, algorithm: 'demand_evaluation' }), []);
   const evaluations = useAsync(() => evaluationsApi.list({ page: 1, page_size: 50 }), []);
+  const jobs = useAsync(() => jobsApi.list(), []);
+  const fittingConfigs = useAsync(() => fittingsApi.configs(), []);
 
   const policyItems = useMemo(() => policies.data?.items || [], [policies.data?.items]);
+
   const demandPolicyItems = useMemo(() => demandPolicyList.data?.items || [], [demandPolicyList.data?.items]);
   const evaluationItems = useMemo(() => evaluations.data?.items || [], [evaluations.data?.items]);
   const demandPolicies = useMemo(() => demandPolicyItems.filter(isDemandEvaluationPolicy), [demandPolicyItems]);
   const idlePolicies = useMemo(() => policyItems.filter((item) => !isDemandEvaluationPolicy(item) && isIdlePolicy(item)), [policyItems]);
   const busyPolicies = useMemo(() => policyItems.filter((item) => !isDemandEvaluationPolicy(item) && isBusyPolicy(item)), [policyItems]);
-
+  const idlePlans = useMemo(() => idlePolicies.map((policy) => timePeriodPlanFromPolicy(policy, 'idle')), [idlePolicies]);
+  const busyPlans = useMemo(() => busyPolicies.map((policy) => timePeriodPlanFromPolicy(policy, 'busy')), [busyPolicies]);
 
   const idleGain = totalBy(idlePolicies, (item) => Number(item.expected_off_peak_gain || item.expected_revenue_gain || 0));
   const busyGain = totalBy(busyPolicies, (item) => Number(item.expected_revenue_gain || 0));
-  const loading = policies.loading || demandPolicyList.loading || evaluations.loading;
-  const error = policies.error || demandPolicyList.error || evaluations.error;
+  const loading = policies.loading || demandPolicyList.loading || evaluations.loading || jobs.loading || fittingConfigs.loading;
+  const error = policies.error || demandPolicyList.error || evaluations.error || jobs.error || fittingConfigs.error;
+
+
+  useEffect(() => {
+    setTaskRows((jobs.data || []).map(scheduledTaskFromJob));
+  }, [jobs.data]);
+
+  useEffect(() => {
+    setFittingStrategies((fittingConfigs.data || []).map(fittingStrategyFromConfig));
+  }, [fittingConfigs.data]);
 
   useEffect(() => {
     const demandId = Number(params.get('demand_id') || 0);
+
     if (!demandId || demandPolicyList.loading || selectedPlan) return;
     const policy = demandPolicies.find((item) => numberField(item.summary_json, 'demand_id') === demandId);
     if (!policy) return;
@@ -877,7 +962,18 @@ export function StrategyDashboard() {
 
 
 
+  async function saveScheduledTask(task: ScheduledTask) {
+    try {
+      await jobsApi.patch(task.id, { enabled: task.status !== 'paused' });
+      message.success('定时任务已保存');
+      await jobs.reload();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '定时任务保存失败');
+    }
+  }
+
   async function patch(values: { summary_json?: string; constraints_json?: string; expected_revenue_gain?: string; effective_from?: string; effective_to?: string }) {
+
     if (!selected) return;
     setSubmitting(true);
     try {
@@ -907,14 +1003,16 @@ export function StrategyDashboard() {
         description="聚合需求评估、闲时和忙时三类策略，统一查看收益、状态与执行建议。"
         actions={<Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate('demand_evaluation')}>策略生成</Button>}
       />
-      {error ? <ErrorState error={error} onRetry={() => { void policies.reload(); void demandPolicyList.reload(); void evaluations.reload(); }} /> : null}
+      {error ? <ErrorState error={error} onRetry={() => { void policies.reload(); void demandPolicyList.reload(); void evaluations.reload(); void jobs.reload(); void fittingConfigs.reload(); }} /> : null}
+
 
       <Spin spinning={loading}>
         <div className="strategy-dashboard-grid page-section">
           <EvaluationModule evaluations={evaluationItems} policies={demandPolicies} onCreate={() => openCreate('demand_evaluation')} onReload={() => { void policies.reload(); void demandPolicyList.reload(); void evaluations.reload(); }} onOpenPlan={openPlanDetail} onAcceptPlan={acceptPlan} onRejectPlan={abandonPlan} onOpenDemand={(demandId) => navigate(`/demands/${demandId}`)} />
 
           <FittingStrategyModule strategies={fittingStrategies} onChange={setFittingStrategies} />
-          <ScheduledTaskModule tasks={taskRows} onChange={setTaskRows} />
+          <ScheduledTaskModule tasks={taskRows} onChange={setTaskRows} onSaveTask={saveScheduledTask} />
+
           <StrategyPolicyModule title="闲时策略" eyebrow="Idle" plans={idlePlans} policies={idlePolicies} primaryLabel="低峰收益" primaryValue={idleGain || totalBy(idlePlans, (plan) => plan.expectedGain)} onCreate={() => openCreate('idle')} onOpenPlan={openPlanDetail} onAcceptPlan={acceptPlan} onEditPlan={editPlan} onAbandonPlan={abandonPlan} />
           <StrategyPolicyModule title="忙时策略" eyebrow="Busy" plans={busyPlans} policies={busyPolicies} primaryLabel="忙时收益" primaryValue={busyGain || totalBy(busyPlans, (plan) => plan.expectedGain)} onCreate={() => openCreate('busy')} onOpenPlan={openPlanDetail} onAcceptPlan={acceptPlan} onEditPlan={editPlan} onAbandonPlan={abandonPlan} />
         </div>

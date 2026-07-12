@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from ..extensions import db
 from ..integrations import billing_client, monitoring_client
-from ..models import Customer, CustomerUsageDaily, Demand
+from ..models import MonitorConsumer, CustomerUsageDaily, Demand
 from ..utils.errors import NotFound
 from ..utils.time import utcnow
 from .alert_service import AlertService
@@ -24,7 +24,7 @@ class CustomerTrackingService:
         ).scalars().all()
         count = 0
         for demand in demands:
-            customer = db.session.get(Customer, demand.customer_id)
+            customer = db.session.get(MonitorConsumer, demand.customer_id)
             if not customer:
                 continue
             actual = monitoring_client().aggregate_for_report(demand.report_id).get("avg_actual_tpm", 0)
@@ -62,7 +62,7 @@ class CustomerTrackingService:
         db.session.commit()
         return count
 
-    def _maybe_alert(self, customer: Customer, report_id: str, achievement: float):
+    def _maybe_alert(self, customer: MonitorConsumer, report_id: str, achievement: float):
         low = current_app.config["ALERT_THRESHOLD_LOW"]
         high = current_app.config["ALERT_THRESHOLD_HIGH"]
         if achievement < low:

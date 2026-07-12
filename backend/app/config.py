@@ -27,7 +27,7 @@ class BaseConfig:
     VENDOR_CLIENT_MODE = os.environ.get("VENDOR_CLIENT_MODE", "mock")
 
     # ---- 资源模型监控数据接口（winlink kingress）----
-    RESOURCE_MONITOR_MODE = os.environ.get("RESOURCE_MONITOR_MODE", "mock")  # mock | http
+    RESOURCE_MONITOR_MODE = os.environ.get("RESOURCE_MONITOR_MODE", "http")  # mock | http
     RESOURCE_MONITOR_BASE_URL = os.environ.get(
         "RESOURCE_MONITOR_BASE_URL",
         "http://winlink.sre.ksyun.com/ksp_service/api/v1/kingress/resource-model-monitor-data/list",

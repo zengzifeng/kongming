@@ -215,10 +215,10 @@ class WaveFittingService:
     def _past_series(customer_code: str, model_name: str,
                      hours: frozenset[int]) -> list[tuple[str, float]]:
         """取该客户+模型历史跑量中「落在时段小时集合内」的整点序列（TPM=Σio/60），按时间升序。"""
-        from ..models import Customer
+        from ..models import MonitorConsumer
 
         customer = db.session.execute(
-            db.select(Customer).where(Customer.customer_code == customer_code)
+            db.select(MonitorConsumer).where(MonitorConsumer.customer_code == customer_code)
         ).scalar_one_or_none()
         if customer is None:
             return []

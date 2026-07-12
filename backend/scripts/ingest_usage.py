@@ -23,7 +23,7 @@ REPO_ROOT = BACKEND_DIR.parent
 from app import create_app  # noqa: E402
 from app.extensions import db  # noqa: E402
 from app.utils.model_name import normalize_model_name  # noqa: E402
-from app.models import Customer, CustomerUsageHourly  # noqa: E402
+from app.models import MonitorConsumer, CustomerUsageHourly  # noqa: E402
 
 DETAIL_XLSX = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "副本模型计量使用量明细_20260709_232212.xlsx"
 PLATFORM_XLSX = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO_ROOT / "平台输入.xlsx"
@@ -110,7 +110,7 @@ def load_detail_rows(path: Path, keep_customers: set[str]) -> list[dict]:
 
 def upsert_customers(names: set[str]) -> dict[str, int]:
     """按客户名 upsert，返回 {客户名: customer_id}。为新客户分配递增 customer_code。"""
-    existing = {c.name: c for c in Customer.query.all()}
+    existing = {c.customer_name: c for c in MonitorConsumer.query.all()}
     # 计算下一个数字编码
     max_num = 0
     for code in (c.customer_code for c in existing.values()):
@@ -122,7 +122,8 @@ def upsert_customers(names: set[str]) -> dict[str, int]:
         cust = existing.get(name)
         if cust is None:
             max_num += 1
-            cust = Customer(customer_code=f"C{max_num:04d}", name=name, level="B")
+            cust = MonitorConsumer(ai_consumer=name, customer_code=f"C{max_num:04d}",
+                                   customer_name=name, level="B")
             db.session.add(cust)
             db.session.flush()  # 取 id
             created += 1

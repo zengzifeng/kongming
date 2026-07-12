@@ -6,9 +6,12 @@ import { MetricCard } from '../../components/MetricCard';
 import { ChartPanel } from '../../components/ChartPanel';
 import { ErrorState } from '../../components/ErrorState';
 import { JsonBlock } from '../../components/JsonBlock';
-import { dashboardsApi, demandsApi, policiesApi, reportsApi } from '../../api/kongming';
+import { dashboardsApi, demandsApi, policiesApi, reportsApi, watchedClustersApi } from '../../api/kongming';
+
 import { useAsync } from '../../hooks/useAsync';
 import { money, numberText, percent } from '../../utils/format';
+import { isWatchedCluster, watchedClusterNames } from '../../utils/watchedClusters';
+
 
 export function OperationsDashboard() {
   const navigate = useNavigate();
@@ -17,8 +20,16 @@ export function OperationsDashboard() {
   const resources = useAsync(() => dashboardsApi.resources({}), []);
   const demands = useAsync(() => demandsApi.list({ page: 1, page_size: 1 }), []);
   const policies = useAsync(() => policiesApi.list({ page: 1, page_size: 50, exclude_status: 'cancelled' }), []);
-  const loading = operations.loading || resources.loading || demands.loading || policies.loading;
-  const error = operations.error || resources.error || demands.error || policies.error;
+  const watchedClusters = useAsync(() => watchedClustersApi.list(), []);
+  const watchedNames = watchedClusterNames(watchedClusters.data);
+  const resourceClusters = (resources.data?.clusters || []).filter((cluster) => isWatchedCluster(cluster.cluster_name, watchedNames));
+  const watchedCapacity = resourceClusters.reduce((sum, cluster) => sum + Number(cluster.total_capacity_tpm || 0), 0);
+  const watchedAvailable = resourceClusters.reduce((sum, cluster) => sum + Number(cluster.current_redundant_tpm || 0), 0);
+  const watchedCurrent = resourceClusters.reduce((sum, cluster) => sum + Number(cluster.current_tpm || 0), 0);
+  const watchedUtilization = watchedCapacity ? watchedCurrent / watchedCapacity : 0;
+  const loading = operations.loading || resources.loading || demands.loading || policies.loading || watchedClusters.loading;
+  const error = operations.error || resources.error || demands.error || policies.error || watchedClusters.error;
+
 
   async function generateReport(type: 'weekly' | 'monthly') {
     const data = type === 'weekly' ? await reportsApi.weekly() : await reportsApi.monthly();
@@ -37,14 +48,16 @@ export function OperationsDashboard() {
         description="集中展示需求、资源、策略三大核心域，并提供周报、月报生成入口。"
         actions={<><Button onClick={() => generateReport('weekly')}>生成/刷新周报</Button><Button type="primary" onClick={() => generateReport('monthly')}>生成/刷新月报</Button></>}
       />
-      {error ? <ErrorState error={error} onRetry={() => { operations.reload(); resources.reload(); demands.reload(); policies.reload(); }} /> : null}
+      {error ? <ErrorState error={error} onRetry={() => { operations.reload(); resources.reload(); demands.reload(); policies.reload(); watchedClusters.reload(); }} /> : null}
+
       <Spin spinning={loading}>
         <div className="metric-grid page-section">
           <MetricCard label="待处理需求" value={operations.data?.pending_demands ?? 0} tone="cyan" onClick={() => navigate('/demands')} />
           <MetricCard label="待审批需求/评估" value={operations.data?.pending_evaluations ?? 0} tone="amber" onClick={() => navigate('/demands')} />
           <MetricCard label="策略条数" value={policies.data?.total ?? 0} tone="purple" onClick={() => navigate('/strategies')} />
           <MetricCard label="今日收益汇总" value={money(operations.data?.revenue_last_24h)} tone="green" onClick={() => navigate('/strategies')} />
-          <MetricCard label="平均资源利用率" value={percent(resources.data?.avg_utilization)} tone="red" onClick={() => navigate('/realtime')} />
+          <MetricCard label="平均资源利用率" value={percent(watchedUtilization)} tone="red" onClick={() => navigate('/realtime')} />
+
         </div>
         <div className="dashboard-grid three overview-domains">
           <ChartPanel title="需求概览">
@@ -56,9 +69,10 @@ export function OperationsDashboard() {
           </ChartPanel>
           <ChartPanel title="资源概览">
             <button className="domain-card" onClick={() => navigate('/realtime')}>
-              <strong>{numberText(resources.data?.total_capacity_tpm)}</strong>
+              <strong>{numberText(watchedCapacity)}</strong>
               <span>总容量 TPM</span>
-              <small>可用 {numberText(resources.data?.total_available_tpm)} · 利用率 {percent(resources.data?.avg_utilization)}</small>
+              <small>可用 {numberText(watchedAvailable)} · 利用率 {percent(watchedUtilization)}</small>
+
             </button>
           </ChartPanel>
           <ChartPanel title="策略概览">

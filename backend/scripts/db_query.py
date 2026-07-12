@@ -43,7 +43,7 @@ def overview(conn):
              round(sum(cu.input_output)/1e8,4) io_yi,
              min(cu.data_time), max(cu.data_time)
            from customer_usage_hourly cu
-           join customers c on c.id = cu.customer_id
+           join monitor_consumers c on c.id = cu.customer_id
            group by c.customer_code, cu.customer_name
            order by rows desc"""
     print_rows(conn.execute(q))

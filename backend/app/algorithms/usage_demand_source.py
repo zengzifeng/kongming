@@ -13,7 +13,7 @@ from collections import defaultdict
 from typing import Iterable
 
 from ..extensions import db
-from ..models import ClusterResource, Customer, CustomerSellDiscount, CustomerUsageHourly
+from ..models import ClusterResource, MonitorConsumer, CustomerSellDiscount, CustomerUsageHourly
 from .base import DemandSnapshotItem
 
 SELF_SOURCE = "自建"
@@ -78,7 +78,7 @@ def build_usage_demand_items(
     exclude_codes = set(exclude_customer_codes or ())
     whitelist = build_self_provider_whitelist() if apply_self_provider_whitelist else {}
 
-    code_by_id = {c.id: c.customer_code for c in db.session.execute(db.select(Customer)).scalars()}
+    code_by_id = {c.id: c.customer_code for c in db.session.execute(db.select(MonitorConsumer)).scalars()}
     excluded_ids = {cid for cid, code in code_by_id.items() if code in exclude_codes}
 
     discount_by_pair: dict[tuple[int, str], float] = {}

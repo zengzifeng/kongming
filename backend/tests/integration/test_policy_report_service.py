@@ -1,12 +1,12 @@
 """PolicyReportService：从持久化的 Policy.summary_json + PolicyRun.input_snapshot_json
 汇结构化报告 payload，验证元/天折算、单TPM收入、集群利用率、以及收益对账。"""
 from app.extensions import db
-from app.models import Customer, Policy, PolicyRun
+from app.models import MonitorConsumer, Policy, PolicyRun
 from app.services.policy_report_service import PolicyReportService, Y
 
 
 def _seed_policy(app):
-    db.session.add(Customer(customer_code="C0300", name="报告客户", level="A"))
+    db.session.add(MonitorConsumer(ai_consumer="报告客户", customer_code="C0300", customer_name="报告客户", level="A"))
     db.session.flush()
 
     demands = [{

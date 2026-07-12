@@ -9,7 +9,7 @@ from ..extensions import db
 from ..models import (
     Alert,
     ClusterResource,
-    Customer,
+    MonitorConsumer,
     CustomerUsageDaily,
     Demand,
     DemandStatus,
@@ -18,6 +18,7 @@ from ..models import (
     Policy,
     PolicyStatus,
     RevenueAttribution,
+    WatchedCluster,
 )
 from ..models.alert import AlertStatus
 from ..utils.errors import NotFound, ValidationFailed
@@ -57,10 +58,10 @@ class DashboardService:
         }
 
     def customers(self, customer_id: int | None = None) -> dict:
-        stmt = select(Customer)
+        stmt = select(MonitorConsumer)
         demand_stmt = select(Demand)
         if customer_id:
-            stmt = stmt.where(Customer.id == customer_id)
+            stmt = stmt.where(MonitorConsumer.id == customer_id)
             demand_stmt = demand_stmt.where(Demand.customer_id == customer_id)
         customers = db.session.execute(stmt).scalars().all()
         demands = db.session.execute(demand_stmt.order_by(
@@ -87,7 +88,7 @@ class DashboardService:
             result.append({
                 "customer_id": c.id,
                 "customer_code": c.customer_code,
-                "name": c.name,
+                "name": c.customer_name,
                 "level": c.level,
                 "avg_achievement_rate_7d": round(achievement, 4),
                 "revenue_7d": sum(float(r.revenue) for r in usage_rows),
@@ -215,6 +216,9 @@ class DashboardService:
         from ..integrations import resource_client
         snapshot = resource_client().snapshot()
         clusters = snapshot.clusters
+        watched_names = self._watched_cluster_names()
+        if watched_names:
+            clusters = [c for c in clusters if c.cluster_name in watched_names]
         if cluster_name:
             clusters = [c for c in clusters if c.cluster_name == cluster_name]
         if deployed_model:
@@ -269,6 +273,14 @@ class DashboardService:
             "total_idle_redundant_tpm": total_idle_redundant,
             "total_busy_redundant_tpm": total_busy_redundant,
             "clusters": clusters_payload,
+        }
+
+    def _watched_cluster_names(self) -> set[str]:
+        return {
+            item.cluster_name
+            for item in db.session.execute(
+                select(WatchedCluster).where(WatchedCluster.enabled.is_(True))
+            ).scalars()
         }
 
     def update_cluster_tpm_per_machine(

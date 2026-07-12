@@ -1,5 +1,4 @@
 from .base import BaseModel
-from .customer import Customer
 from .resource import ClusterResource
 from .sync_batch import SyncBatch
 from .raw_filing import RawFiling
@@ -26,6 +25,7 @@ from .consumer_model_tpm import ConsumerModelTpm
 from .gpu_node_count import GpuNodeCount
 from .vendor import VendorQuota, VendorStatus
 from .model_list_price import ModelListPrice
+from .watched_cluster import WatchedCluster
 from .fitting import (
     FittingAlgorithm,
     CustomerFittingConfig,
@@ -36,7 +36,6 @@ from .fitting import (
 
 __all__ = [
     "BaseModel",
-    "Customer",
     "ClusterResource",
     "SyncBatch",
     "RawFiling",
@@ -76,6 +75,7 @@ __all__ = [
     "VendorQuota",
     "VendorStatus",
     "ModelListPrice",
+    "WatchedCluster",
     "FittingAlgorithm",
     "CustomerFittingConfig",
     "FittingResult",

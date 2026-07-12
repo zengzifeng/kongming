@@ -37,7 +37,7 @@ class Demand(BaseModel):
     )
 
     report_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("monitor_consumers.id"), index=True)
     model_name: Mapped[str] = mapped_column(String(64), nullable=False)
     expected_tpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     expected_rpm: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
