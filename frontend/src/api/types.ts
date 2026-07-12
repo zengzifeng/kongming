@@ -137,6 +137,41 @@ export interface RevenueAnalysis {
   items: RevenueAnalysisItem[];
 }
 
+export interface RevenueTimePeriodItem {
+  id: number;
+  date: string;
+  customer_name: string;
+  model_name: string;
+  sale_discount: number;
+  purchase_discount: number;
+  self_incremental_revenue: number;
+  vendor_cost_reduction: number;
+  total_revenue: number;
+  price_per_million_tokens: number;
+}
+
+export interface RevenuePeakShavingItem {
+  id: number;
+  date: string;
+  customer_name: string;
+  model_name: string;
+  peak_tpm_before: number;
+  peak_watermark: number;
+  saved_tpm: number;
+  machines_before: number;
+  machines_after: number;
+  self_cost_reduction: number;
+  vendor_cost_increase: number;
+  directed_shift_revenue: number;
+}
+
+export interface RevenueDashboard {
+  generated_at: string;
+  idle: RevenueTimePeriodItem[];
+  busy: RevenueTimePeriodItem[];
+  peak_shaving: RevenuePeakShavingItem[];
+}
+
 export interface VendorQuota extends BaseEntity {
   vendor: string;
   model: string;

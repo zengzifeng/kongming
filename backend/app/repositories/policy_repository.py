@@ -44,3 +44,10 @@ class PolicyRepository(BaseRepository[Policy]):
         return self.session.execute(
             select(PolicyAction).where(PolicyAction.policy_id == policy_id)
         ).scalars().all()
+
+    def latest_for_demand(self, demand_id: int) -> Policy | None:
+        # 一个需求对应一条策略：取该 demand 最新的产出策略。
+        return self.session.execute(
+            select(Policy).where(Policy.demand_id == demand_id)
+            .order_by(Policy.id.desc()).limit(1)
+        ).scalar_one_or_none()

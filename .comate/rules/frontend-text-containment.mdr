@@ -1,0 +1,19 @@
+---
+description: Keep all frontend text inside its visible container borders
+globs: frontend/**/*.{css,scss,tsx,ts,jsx,js}
+alwaysApply: false
+---
+
+# Frontend Text Containment
+
+Frontend text must never cross or visually overlap its container border at any supported viewport width.
+
+When implementing or changing frontend layouts:
+
+- Give grid and flex children permission to shrink with `min-width: 0` where needed.
+- Define grid tracks with `minmax(0, 1fr)` when content length is not fixed.
+- Handle uncontrolled long text explicitly with wrapping (`overflow-wrap: anywhere`) or intentional truncation with an accessible full-text affordance.
+- Keep labels, badges, buttons, and absolutely positioned content within the parent's content box.
+- Prefer normal grid or flex flow over absolute positioning for dynamic text.
+- Verify representative long Chinese, English, numeric, and unbroken identifier values on desktop and narrow viewports.
+- Do not use global `overflow: hidden` as a substitute for fixing the responsible layout.

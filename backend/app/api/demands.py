@@ -33,9 +33,11 @@ def get_demand(demand_id: int):
     eval_repo = EvaluationRepository()
     pol_repo = PolicyRepository()
     latest_eval = eval_repo.latest_for_demand(demand.id)
+    policy = pol_repo.latest_for_demand(demand.id)
     return success({
         "demand": model_to_dict(demand),
         "latest_evaluation": model_to_dict(latest_eval) if latest_eval else None,
+        "policy": model_to_dict(policy) if policy else None,
     })
 
 

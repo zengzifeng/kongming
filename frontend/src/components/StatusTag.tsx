@@ -28,7 +28,13 @@ const toneMap: Record<string, string> = {
   reject: 'red',
 };
 
-export function StatusTag({ value }: { value?: string | null }) {
-  if (!value) return <Tag>未知</Tag>;
-  return <Tag color={toneMap[value] || 'default'}>{value}</Tag>;
+interface StatusTagProps {
+  value?: string | null;
+  label?: string | null;
 }
+
+export function StatusTag({ value, label }: StatusTagProps) {
+  if (!value) return <Tag>{label || '未知'}</Tag>;
+  return <Tag color={toneMap[value] || 'default'}>{label || value}</Tag>;
+}
+

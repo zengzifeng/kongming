@@ -1,0 +1,18 @@
+---
+description: Do not automatically start web servers after code changes
+alwaysApply: true
+---
+
+# No Automatic Web Server Startup
+
+After modifying code, do not proactively start or restart long-running web/dev servers.
+
+The project already has a continuously running environment, so avoid commands such as:
+
+```bash
+npm run dev
+vite
+flask run
+```
+
+Builds, tests, static checks, compile checks, and short API checks are still fine. Only start or restart a web service when the user explicitly asks for it.

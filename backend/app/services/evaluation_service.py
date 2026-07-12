@@ -69,13 +69,10 @@ class EvaluationService:
             },
         ))
 
-        if demand.status == DemandStatus.PENDING:
-            demand.status = DemandStatus.EVALUATING
-        if recommendation == EvaluationRecommendation.AUTO_APPROVE:
-            self._approve(evaluation, demand, operator="system", comment="自动通过")
-        else:
-            demand.status = DemandStatus.AWAITING_APPROVAL
+        # 评估生成后统一进入待审批态（PENDING/EVALUATING → AWAITING_APPROVAL）。
+        demand.status = DemandStatus.AWAITING_APPROVAL
         db.session.flush()
+        self._submit_demand_evaluation_policy(demand.id)
         return evaluation
 
     def approve(self, evaluation_id: int, operator: str, comment: str | None = None) -> Evaluation:
@@ -125,6 +122,16 @@ class EvaluationService:
             after_json={"status": evaluation.status},
         ))
         db.session.flush()
+
+    def _submit_demand_evaluation_policy(self, demand_id: int):
+        from .policy_service import PolicyService
+        PolicyService().submit_run(
+            "demand_evaluation",
+            demand_ids=[demand_id],
+            params={"template": "需求评估策略", "module": "demand_evaluation"},
+            triggered_by="demand_evaluation",
+            demand_id=demand_id,
+        )
 
     def _load(self, evaluation_id: int):
         evaluation = db.session.get(Evaluation, evaluation_id)

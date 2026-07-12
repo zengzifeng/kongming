@@ -1,6 +1,7 @@
 import { Form, Input, InputNumber, message, Select } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+
 import { dashboardsApi, vendorsApi } from '../../api/kongming';
 import type { ResourceCluster, VendorQuota } from '../../api/types';
 import { PageHeader } from '../../components/PageHeader';
@@ -33,6 +34,7 @@ interface SelfHostedClusterRow {
 interface VendorRuntimeRow {
   id: string;
   vendorName: string;
+  providerName: string;
   modelName: string;
   quotaW: number;
   purchaseDiscount: number;
@@ -43,6 +45,7 @@ interface VendorRuntimeRow {
 }
 
 interface ChartLine {
+
   key: string;
   name: string;
   color: string;
@@ -51,6 +54,16 @@ interface ChartLine {
 interface FitWaveLine extends ChartLine {
   strokeDasharray?: string;
 }
+
+interface CustomerWatermark {
+  key: string;
+  name: string;
+  color: string;
+  peakDemand: number;
+  selfWatermark: number;
+  vendorTakeover: number;
+}
+
 
 interface CustomerDispatchRatio {
   key: string;
@@ -61,6 +74,7 @@ interface CustomerDispatchRatio {
 }
 
 interface CustomerFitWave {
+
   model: string;
   data: Array<Record<string, number | string>>;
   lines: FitWaveLine[];
@@ -77,6 +91,10 @@ interface ChartSummaryRow {
   last: string;
 }
 
+interface ChartReferenceLine extends FitWaveLine {
+  value: number;
+}
+
 interface RuntimeLineChartProps {
   title: string;
   data: Array<Record<string, number | string>>;
@@ -85,7 +103,23 @@ interface RuntimeLineChartProps {
   yDomain: [number, number];
   yTicks: number[];
   yFormatter: (value: number) => string;
+  selectedLineKey?: string | null;
+  referenceLines?: ChartReferenceLine[];
+  onLineClick?: (key: string) => void;
+  forceSolidLines?: boolean;
 }
+
+
+
+interface VendorModelGroup {
+  modelName: string;
+  rows: VendorRuntimeRow[];
+  quotaW: number;
+  onlineRuntime: number;
+  redundantRuntime: number;
+  runtimeRatio: number;
+}
+
 
 interface CapacityBarShapeProps {
   x?: number;
@@ -359,17 +393,61 @@ function formatDiscount(value?: number | null) {
   return n > 0 ? percent(n) : '-';
 }
 
+function rawJsonValue(row: VendorQuota, key: string) {
+  const value = row.raw_json?.[key];
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+}
+
+function buildVendorModelGroups(rows: VendorRuntimeRow[]): VendorModelGroup[] {
+  return Array.from(new Set(rows.map((row) => row.modelName))).map((modelName) => {
+    const groupRows = rows.filter((row) => row.modelName === modelName);
+    const quotaW = groupRows.reduce((total, row) => total + row.quotaW, 0);
+    const onlineRuntime = groupRows.reduce((total, row) => total + row.onlineRuntime, 0);
+    const redundantRuntime = groupRows.reduce((total, row) => total + row.redundantRuntime, 0);
+    return {
+      modelName,
+      rows: groupRows,
+      quotaW,
+      onlineRuntime,
+      redundantRuntime,
+      runtimeRatio: quotaW > 0 ? onlineRuntime / quotaW : 0,
+    };
+  });
+}
+
+function getLineMax(data: Array<Record<string, number | string>>, key: string) {
+  return data.reduce((max, point) => Math.max(max, Number(point[key] || 0)), 0);
+}
+
+function getCustomerWatermarks(wave: CustomerFitWave): CustomerWatermark[] {
+  return wave.ratios.map((item) => {
+    const peakDemand = getLineMax(wave.data, item.key);
+    return {
+      key: item.key,
+      name: item.name,
+      color: item.color,
+      peakDemand,
+      selfWatermark: Math.round(peakDemand * item.selfRatio),
+      vendorTakeover: Math.round(peakDemand * item.vendorRatio),
+
+    };
+  });
+}
+
 function mapVendorQuota(row: VendorQuota): VendorRuntimeRow {
   const quotaW = toWanTpm(row.quota_tpm);
+
   const onlineRuntime = toWanTpm(row.actual_tpm);
   const redundantRuntime = Math.max(toWanTpm(row.actual_redundant_tpm), 0);
   return {
     id: String(row.id),
     vendorName: row.vendor,
+    providerName: rawJsonValue(row, 'provider'),
     modelName: row.model,
     quotaW,
     purchaseDiscount: Number(row.purchase_discount || 0),
     purchaseDiscountText: formatDiscount(row.purchase_discount),
+
     onlineRuntime,
     redundantRuntime,
     runtimeRatio: quotaW > 0 ? onlineRuntime / quotaW : 0,
@@ -379,16 +457,18 @@ function mapVendorQuota(row: VendorQuota): VendorRuntimeRow {
 function buildVendorMetrics(rows: VendorRuntimeRow[]): MetricItem[] {
   const quotaW = rows.reduce((total, row) => total + row.quotaW, 0);
   const onlineRuntime = rows.reduce((total, row) => total + row.onlineRuntime, 0);
+  const redundantRuntime = rows.reduce((total, row) => total + row.redundantRuntime, 0);
   const runtimeRatio = quotaW > 0 ? onlineRuntime / quotaW : 0;
   return [
-    { label: '供应商数量', value: numberText(rows.length) },
-    { label: '供应量级（万TPM）', value: numberText(quotaW) },
-    { label: '当前实跑量级（万TPM）', value: numberText(onlineRuntime) },
-    { label: '当前实跑占比', value: percent(runtimeRatio) },
+    { label: '模型维度供应商总量', value: numberText(quotaW) },
+    { label: '实际占用总量', value: numberText(onlineRuntime) },
+    { label: '实际占用百分比', value: percent(runtimeRatio) },
+    { label: '冗余量', value: numberText(redundantRuntime) },
   ];
 }
 
 function MetricStrip({ items }: { items: MetricItem[] }) {
+
   return (
     <div className="realtime-metric-strip">
       {items.map((item) => (
@@ -418,7 +498,8 @@ function CapacityBarShape({ x = 0, y = 0, width = 0, height = 0, payload }: Capa
   );
 }
 
-function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yFormatter }: RuntimeLineChartProps) {
+function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yFormatter, selectedLineKey, referenceLines, onLineClick, forceSolidLines }: RuntimeLineChartProps) {
+
   return (
     <div className="realtime-chart-card">
       <div className="realtime-chart-title">{title}</div>
@@ -429,13 +510,36 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
             <XAxis dataKey="time" axisLine={false} tickLine={false} minTickGap={12} tick={{ fill: '#7898a7', fontSize: 11 }} />
             <YAxis width={44} domain={yDomain} ticks={yTicks} tickFormatter={(value) => yFormatter(Number(value))} axisLine={false} tickLine={false} tick={{ fill: '#7898a7', fontSize: 11 }} />
             <Tooltip contentStyle={{ background: '#071018', border: '1px solid rgba(82, 191, 255, .28)', borderRadius: 8 }} labelStyle={{ color: '#e6f7ff' }} />
-            {lines.map((line) => (
-              <Line key={line.key} type="monotone" dataKey={line.key} name={line.name} stroke={line.color} strokeWidth={2} strokeDasharray={line.strokeDasharray} dot={false} isAnimationActive={false} />
+            {referenceLines?.map((line) => (
+              <ReferenceLine key={line.key} y={line.value} stroke={line.color} strokeDasharray={line.strokeDasharray || '6 6'} strokeOpacity={0.45} strokeWidth={2} ifOverflow="extendDomain" />
             ))}
+            {lines.map((line) => {
+              const isSelected = selectedLineKey === line.key;
+              const isDimmed = Boolean(selectedLineKey && !isSelected);
+              return (
+                <Line
+                  key={line.key}
+                  type="monotone"
+                  dataKey={line.key}
+                  name={line.name}
+                  stroke={line.color}
+                  strokeWidth={isSelected ? 2.6 : 2}
+                  strokeDasharray={forceSolidLines ? undefined : line.strokeDasharray}
+                  strokeOpacity={isDimmed ? 0.38 : 1}
+
+                  dot={false}
+                  activeDot={onLineClick ? { r: 4, onClick: () => onLineClick(line.key) } : false}
+                  isAnimationActive={false}
+                  onClick={onLineClick ? () => onLineClick(line.key) : undefined}
+                  style={onLineClick ? { cursor: 'pointer' } : undefined}
+                />
+              );
+            })}
           </LineChart>
         </ResponsiveContainer>
       </div>
       {summary ? (
+
         <div className="realtime-chart-summary">
           <span />
           <strong>Max</strong>
@@ -470,7 +574,10 @@ export function RealtimeDashboard() {
   const [vendorRows, setVendorRows] = useState<VendorRuntimeRow[]>([]);
   const [savingClusterId, setSavingClusterId] = useState<string | null>(null);
   const [selectedFitModel, setSelectedFitModel] = useState(customerFitWaves[0].model);
+  const [selectedCustomerKey, setSelectedCustomerKey] = useState<string | null>(null);
+
   const vendorMetrics = useMemo(() => buildVendorMetrics(vendorRows), [vendorRows]);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -580,31 +687,36 @@ export function RealtimeDashboard() {
   );
 
   const renderVendorRuntime = () => {
+    const modelGroups = buildVendorModelGroups(vendorRows);
     const maxQuotaW = Math.max(...vendorRows.map((row) => row.quotaW), 1);
-    const modelGroups = Array.from(new Set(vendorRows.map((row) => row.modelName))).map((modelName) => ({
-      modelName,
-      rows: vendorRows.filter((row) => row.modelName === modelName),
-    }));
 
     return (
       <section className="wire-card realtime-panel realtime-vendor-panel">
+
         <div className="wire-card-title">三方供应商</div>
         <MetricStrip items={vendorMetrics} />
         <div className="vendor-runtime-chart" role="img" aria-label="三方供应商按模型展示供应量级和当前实跑占比">
           {modelGroups.map((group) => (
-            <div className="vendor-model-group" key={group.modelName}>
+            <div className="vendor-model-group" key={group.modelName} title={`${group.modelName} | 供应商总量 ${numberText(group.quotaW)} 万TPM | 实际占用 ${numberText(group.onlineRuntime)} 万TPM | 冗余 ${numberText(group.redundantRuntime)} 万TPM | 占比 ${percent(group.runtimeRatio)}`}>
               <div className="vendor-model-name">{group.modelName}</div>
+              <div className="vendor-model-stats">
+                <span><b>总量</b>{numberText(group.quotaW)}</span>
+                <span><b>占用</b>{numberText(group.onlineRuntime)}</span>
+                <span><b>占比</b>{percent(group.runtimeRatio)}</span>
+                <span><b>冗余</b>{numberText(group.redundantRuntime)}</span>
+              </div>
               <div className="vendor-bar-stage">
                 {group.rows.map((row) => {
                   const quotaHeight = Math.max((row.quotaW / maxQuotaW) * 100, row.quotaW > 0 ? 8 : 0);
                   const runtimePercent = Math.max(Math.min(row.runtimeRatio * 100, 100), 0);
+                  const vendorLabel = row.providerName ? `${row.vendorName} ${row.providerName}` : row.vendorName;
                   return (
-                    <div className="vendor-bar-cell" key={row.id} title={`${row.vendorName} | 供应总量 ${numberText(row.quotaW)} 万TPM | 当前实跑 ${numberText(row.onlineRuntime)} 万TPM | 冗余 ${numberText(row.redundantRuntime)} 万TPM | 占比 ${percent(row.runtimeRatio)} | 折扣 ${row.purchaseDiscountText}`}>
+                    <div className="vendor-bar-cell" key={row.id} title={`${vendorLabel} | 供应总量 ${numberText(row.quotaW)} 万TPM | 当前实跑 ${numberText(row.onlineRuntime)} 万TPM | 冗余 ${numberText(row.redundantRuntime)} 万TPM | 占比 ${percent(row.runtimeRatio)} | 折扣 ${row.purchaseDiscountText}`}>
                       <div className="vendor-bar-label">{numberText(row.quotaW)}w</div>
                       <div className="vendor-bar" style={{ height: `${quotaHeight}%` }}>
                         <span className="vendor-bar-line" style={{ bottom: `${runtimePercent}%` }} />
                       </div>
-                      <div className="vendor-supplier-axis" title={row.vendorName}>{row.vendorName}</div>
+                      <div className="vendor-supplier-axis" title={vendorLabel}>{row.vendorName}</div>
                     </div>
                   );
                 })}
@@ -614,6 +726,7 @@ export function RealtimeDashboard() {
         </div>
 
         <div className="cluster-chart-legend vendor-chart-legend">
+
           <span><i className="legend-capacity" />供应量级</span>
           <span><i className="legend-runtime" />当前实跑量级位置/占比</span>
           <span><i className="legend-redundant" />可用冗余量</span>
@@ -672,30 +785,50 @@ export function RealtimeDashboard() {
     </section>
   );
 
-  const renderCustomerDispatchRatios = (wave: CustomerFitWave) => (
-    <div className="customer-dispatch-ratios">
-      {wave.ratios.map((item) => (
-        <div className="customer-dispatch-item" key={item.key} title={`${item.name} | 自建 ${percent(item.selfRatio)} | 三方 ${percent(item.vendorRatio)}`}>
-          <div className="customer-dispatch-head">
-            <span><i style={{ backgroundColor: item.color }} />{item.name}</span>
-            <strong>{percent(item.selfRatio)} / {percent(item.vendorRatio)}</strong>
-          </div>
-          <div className="customer-dispatch-track">
-            <span className="customer-dispatch-self" style={{ width: `${Math.max(Math.min(item.selfRatio * 100, 100), 0)}%` }} />
-            <span className="customer-dispatch-vendor" />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+  const renderCustomerDispatchRatios = (wave: CustomerFitWave) => {
+    const watermarks = getCustomerWatermarks(wave);
+    const activeKey = watermarks.some((item) => item.key === selectedCustomerKey) ? selectedCustomerKey : null;
+    return (
+      <div className="customer-watermark-grid">
+        {watermarks.map((item) => {
+          const isSelected = item.key === activeKey;
+
+          return (
+            <button
+              type="button"
+              className={`customer-watermark-item${isSelected ? ' is-selected' : ''}`}
+              key={item.key}
+              title={`${item.name} | 跑量峰值 ${numberText(item.peakDemand)} TPM | 自建水位线 ${numberText(item.selfWatermark)} TPM | 三方承接 ${numberText(item.vendorTakeover)} TPM`}
+              onClick={() => setSelectedCustomerKey((current) => (current === item.key ? null : item.key))}
+            >
+              <span className="customer-watermark-name"><i style={{ backgroundColor: item.color }} />{item.name}</span>
+              {isSelected ? (
+                <span className="customer-watermark-values">
+                  <span><b>实际/拟合跑量</b>{numberText(item.peakDemand)}</span>
+                  <span><b>自建水位线</b>{numberText(item.selfWatermark)}</span>
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
 
   const renderFitRuntime = (period: Extract<ResourcePeriod, 'idle' | 'busy'>) => {
+
     const isBusy = period === 'busy';
     const customerWaves = isBusy ? busyCustomerFitWaves : customerFitWaves;
     const selectedCustomerFitWave = customerWaves.find((item) => item.model === selectedFitModel) || customerWaves[0];
+    const watermarks = getCustomerWatermarks(selectedCustomerFitWave);
+    const selectedWatermark = watermarks.find((item) => item.key === selectedCustomerKey) || null;
+    const activeCustomerKey = selectedWatermark?.key || null;
+
     return (
       <div className="idle-fit-module-stack">
         <section className="wire-card realtime-panel realtime-runtime-panel idle-fit-panel">
+
           <div className="wire-card-title">集群拟合波形</div>
           <RuntimeLineChart
             title={isBusy ? '忙时跑量预估（08:00-24:00）' : '闲时跑量预估'}
@@ -713,10 +846,15 @@ export function RealtimeDashboard() {
               <Form.Item label="模型">
                 <Select
                   value={selectedFitModel}
-                  onChange={setSelectedFitModel}
+                  onChange={(model) => {
+                    setSelectedFitModel(model);
+                    setSelectedCustomerKey(null);
+                  }}
+
                   options={customerFitWaves.map((item) => ({ label: item.model, value: item.model }))}
                 />
               </Form.Item>
+
             </Form>
           </div>
           <RuntimeLineChart
@@ -726,7 +864,13 @@ export function RealtimeDashboard() {
             yDomain={selectedCustomerFitWave.yDomain}
             yTicks={selectedCustomerFitWave.yTicks}
             yFormatter={formatTpm}
+            selectedLineKey={activeCustomerKey}
+            referenceLines={selectedWatermark ? [{ key: `${selectedWatermark.key}-self-watermark`, name: `${selectedWatermark.name} 自建水位线`, color: selectedWatermark.color, value: selectedWatermark.selfWatermark, strokeDasharray: '6 6' }] : []}
+            onLineClick={(key) => setSelectedCustomerKey((current) => (current === key ? null : key))}
+            forceSolidLines
+
           />
+
           {renderCustomerDispatchRatios(selectedCustomerFitWave)}
         </section>
       </div>

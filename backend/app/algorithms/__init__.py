@@ -12,11 +12,13 @@ from .base import (
 from .snapshot import build_snapshot, build_run_snapshot
 from .realtime_solver import RealtimeSolver
 from .time_period_solver import TimePeriodSolver
+from .demand_evaluation_solver import DemandEvaluationSolver
 
 
 _SOLVERS: dict[str, Solver] = {
     "realtime": RealtimeSolver(),
     "time_period": TimePeriodSolver(),
+    "demand_evaluation": DemandEvaluationSolver(),
 }
 
 
@@ -39,4 +41,5 @@ __all__ = [
     "get_solver",
     "RealtimeSolver",
     "TimePeriodSolver",
+    "DemandEvaluationSolver",
 ]

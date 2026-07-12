@@ -8,6 +8,7 @@ echo.
 
 call :kill_port 5001 Backend
 call :kill_port 5173 Frontend
+call :kill_port 5175 Frontend
 
 echo.
 echo Stop command completed.

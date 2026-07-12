@@ -1,4 +1,5 @@
 from flask import Flask
+from sqlalchemy import inspect, text
 
 from . import extensions
 from .config import CONFIG_MAP
@@ -21,17 +22,27 @@ def create_app(config_name: str = "dev") -> Flask:
 
     with app.app_context():
         extensions.db.create_all()
-
-    # 定时任务配置 seed（幂等）：即使调度线程未启用，前端仍可通过 /api/v1/jobs 管理。
-    from .jobs.scheduler import ensure_default_schedules
-    ensure_default_schedules(app)
-
-    # 拟合算法目录 seed（幂等）：有哪些算法可选管理在库，API 只读。
-    from .services.wave_fitting_service import ensure_default_fitting_algorithms
-    ensure_default_fitting_algorithms(app)
-
-    if app.config.get("SCHEDULER_ENABLED") and not app.config.get("TESTING"):
-        from .jobs.scheduler import start_scheduler
-        start_scheduler(app)
+        _apply_sqlite_compatibility_migrations()
+        if app.config.get("SCHEDULER_ENABLED", True):
+            from .jobs import start_scheduler
+            start_scheduler(app)
 
     return app
+
+
+def _apply_sqlite_compatibility_migrations() -> None:
+    """补齐 create_all 无法加入既有 SQLite 表的新列。"""
+    engine = extensions.db.engine
+    if engine.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(engine)
+    demand_columns = {column["name"] for column in inspector.get_columns("demands")}
+    policy_columns = {column["name"] for column in inspector.get_columns("policies")}
+
+    with engine.begin() as connection:
+        if "extra" not in demand_columns:
+            connection.execute(text("ALTER TABLE demands ADD COLUMN extra JSON"))
+        if "demand_id" not in policy_columns:
+            connection.execute(text("ALTER TABLE policies ADD COLUMN demand_id INTEGER REFERENCES demands(id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_policies_demand_id ON policies(demand_id)"))

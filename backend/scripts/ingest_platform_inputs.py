@@ -104,14 +104,23 @@ def ingest_vendors(wb):
     VendorQuota.query.delete()
     rows = read_sheet(wb, "供应商信息")
     for r in rows:
+        quota_tpm = _num(r["供应商总量(W)"]) * WTPM
+        actual_tpm = _num(r.get("实际占用总量(W)")) * WTPM
         db.session.add(VendorQuota(
-            vendor=str(r["provider"]),
+            vendor=str(r.get("供应商名称") or r.get("供应商") or r.get("provider") or "").strip(),
             model=normalize_model_name(r["模型名称"]),
             # 供应商总量(W)：原值单位为「万」，转为绝对量存入 quota_tpm，原值留档 raw_json
-            quota_tpm=_num(r["供应商总量(W)"]) * 10000,
+            quota_tpm=quota_tpm,
+            actual_tpm=actual_tpm,
+            actual_redundant_tpm=max(quota_tpm - actual_tpm, 0),
             purchase_discount=_num(r["采购折扣"]),
             effective_from=SNAPSHOT_DATE,
-            raw_json={"供应商总量_W": r["供应商总量(W)"], "source": "平台输入.供应商信息"},
+            raw_json={
+                "provider": r.get("provider"),
+                "供应商总量_W": r["供应商总量(W)"],
+                "实际占用总量_W": r.get("实际占用总量(W)"),
+                "source": "平台输入.供应商信息",
+            },
         ))
     print(f"[vendor_quotas] 清空 mock，写入 {len(rows)} 行")
 

@@ -61,19 +61,30 @@ cd /d "%ROOT%\frontend" || goto :fail
 set "NPM_CONFIG_CACHE=%ROOT%\frontend\.npm-cache"
 set "NPM_CONFIG_AUDIT=false"
 set "NPM_CONFIG_FUND=false"
-if exist "package-lock.json" (
-  call npm.cmd ci --no-audit --no-fund --cache "%NPM_CONFIG_CACHE%"
-  if errorlevel 1 (
-    echo [WARN] npm ci failed. Cleaning npm cache and retrying with npm install...
-    call npm.cmd cache clean --force --cache "%NPM_CONFIG_CACHE%"
-    if exist "node_modules" rmdir /s /q "node_modules"
-    call npm.cmd install --no-audit --no-fund --cache "%NPM_CONFIG_CACHE%"
-  )
-) else (
-  call npm.cmd install --no-audit --no-fund --cache "%NPM_CONFIG_CACHE%"
-)
-if errorlevel 1 goto :fail
+if not exist "package-lock.json" goto :npm_install
+call npm.cmd ci --no-audit --no-fund --cache "%NPM_CONFIG_CACHE%"
+if not errorlevel 1 goto :npm_done
 
+echo [WARN] npm ci failed. Cleaning npm cache and retrying with npm install...
+call npm.cmd cache clean --force --cache "%NPM_CONFIG_CACHE%"
+if exist "node_modules" rmdir /s /q "node_modules"
+if exist "node_modules" (
+  echo [ERROR] Cannot remove frontend\node_modules.
+  echo [HINT] A running Vite/Node process may be locking the Rollup native module.
+  echo [HINT] Stop the frontend process, then run build-windows.bat again.
+  goto :fail
+)
+
+:npm_install
+call npm.cmd install --no-audit --no-fund --cache "%NPM_CONFIG_CACHE%"
+if errorlevel 1 (
+  echo [ERROR] Frontend dependency installation failed.
+  echo [HINT] On Windows, EPERM unlink usually means a running Vite/Node process is using Rollup.
+  echo [HINT] Stop the frontend process, then run build-windows.bat again.
+  goto :fail
+)
+
+:npm_done
 echo.
 echo [4/5] Building frontend...
 call npm.cmd run build

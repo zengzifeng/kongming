@@ -57,7 +57,15 @@ def _int(v):
         return int(float(v))
 
 
+def _pick(row, *keys, default=None):
+    for key in keys:
+        if key in row and row[key] not in (None, ''):
+            return row[key]
+    return default
+
+
 def _to_dt(v):
+
     if isinstance(v, datetime):
         return v.strftime('%Y-%m-%d %H:%M:%S')
     return datetime.strptime(str(v).strip(), '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
@@ -222,15 +230,19 @@ def main():
     # ---- vendor_quotas（供应商信息）：vendor=供应商名称, model 规范化 ----
     n = 0
     for r in read_sheet(pf, '供应商信息'):
+        quota_tpm = _num(r['供应商总量(W)']) * WTPM
+        actual_tpm = _num(r.get('实际占用总量(W)')) * WTPM
         cur.execute(
             "INSERT INTO vendor_quotas(created_at,updated_at,vendor,model,quota_tpm,"
-            "purchase_discount,effective_from,status,raw_json) VALUES(?,?,?,?,?,?,?,?,?)",
-            (NOW, NOW, str(r['供应商名称']), normalize_model_name(r['模型名称']),
-             _num(r['供应商总量(W)']) * WTPM, _num(r['采购折扣']), SNAPSHOT_DATE, 'active',
-             json.dumps({'供应商总量_W': r['供应商总量(W)'], 'source': '平台输入.供应商信息'},
+            "actual_tpm,actual_redundant_tpm,purchase_discount,effective_from,status,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (NOW, NOW, str(_pick(r, '供应商名称', '供应商', 'provider', default='')).strip(), normalize_model_name(r['模型名称']),
+             quota_tpm, actual_tpm, max(quota_tpm - actual_tpm, 0), _num(r['采购折扣']), SNAPSHOT_DATE, 'active',
+             json.dumps({'provider': r.get('provider'), '供应商总量_W': r['供应商总量(W)'],
+                         '实际占用总量_W': r.get('实际占用总量(W)'), 'source': '平台输入.供应商信息'},
                         ensure_ascii=False)))
         n += 1
     print(f'[vendor_quotas]          {n} 行')
+
 
     # ---- model_list_prices（列表价）----
     n = 0

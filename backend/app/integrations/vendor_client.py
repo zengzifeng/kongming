@@ -21,13 +21,14 @@ VendorQuota = VendorQuotaDTO
 
 
 _SEED = [
-    ("百度", "glm-5.2", 12_000_000, 0.75, "供应量级 1200 万 TPM"),
-    ("鼎鼎方游（腾讯渠道）", "glm-5.2", 50_000_000, 0.73, "供应量级 5000 万 TPM"),
-    ("香港锦望", "glm-5.2", 10_000_000, 0.55, "供应量级 1000 万 TPM"),
-    ("月暗原厂", "kimi-k2.5", 60_000_000, 0.80, "供应量级 6000 万 TPM"),
-    ("月暗原厂", "kimi-k2.6", 100_000_000, 0.80, "供应量级 10000 万 TPM"),
-    ("百度", "deepseek-v32", 12_000_000, 0.40, "供应量级 1200 万 TPM"),
+    ("百度", "thirdparty-baidu-ofb", "glm-5.2", 12_000_000, 0.75, "供应量级 1200 万 TPM"),
+    ("鼎鼎方游", "thirdparty-ddfy-openai", "glm-5.2", 50_000_000, 0.73, "供应量级 5000 万 TPM"),
+    ("香港锦望", "thirdparty-hkjw-openai", "glm-5.2", 10_000_000, 0.55, "供应量级 1000 万 TPM"),
+    ("月暗原厂", "thirdparty-kimi-fc", "kimi-k2.5", 60_000_000, 0.80, "供应量级 6000 万 TPM"),
+    ("月暗原厂", "thirdparty-kimi-fc", "kimi-k2.6", 100_000_000, 0.80, "供应量级 10000 万 TPM"),
+    ("百度", "thirdparty-baidu-ofb", "deepseek-v32", 12_000_000, 0.40, "供应量级 1200 万 TPM"),
 ]
+
 
 
 class VendorClient:
@@ -75,7 +76,7 @@ class VendorClient:
         from ..models import VendorQuota as VendorQuotaModel
 
         created = []
-        for vendor, model, quota, discount, notes in _SEED:
+        for vendor, provider, model, quota, discount, notes in _SEED:
             row = VendorQuotaModel(
                 vendor=vendor,
                 model=model,
@@ -87,8 +88,9 @@ class VendorClient:
                 purchase_discount=discount,
                 effective_from=now - timedelta(days=1),
                 notes=notes,
-                raw_json={"source": "manual-image", "quota_w": quota / 10000},
+                raw_json={"source": "manual-image", "provider": provider, "quota_w": quota / 10000},
             )
+
             db.session.add(row)
             created.append(row)
         db.session.flush()

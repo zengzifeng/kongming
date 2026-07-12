@@ -115,5 +115,7 @@ class DemandService:
         for field in ("expected_start_at", "expected_end_at"):
             if field in patch and patch[field]:
                 setattr(demand, field, patch[field])
+        if "extra" in patch and patch["extra"] is not None:
+            demand.extra = patch["extra"]
         db.session.flush()
         return demand

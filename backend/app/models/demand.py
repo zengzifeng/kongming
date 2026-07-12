@@ -57,3 +57,5 @@ class Demand(BaseModel):
     source_batch_id: Mapped[int | None] = mapped_column(ForeignKey("sync_batches.id"))
     source_payload_hash: Mapped[str | None] = mapped_column(String(64))
     field_completeness_score: Mapped[float] = mapped_column(Numeric(5, 4), default=0)
+    # 需求扩展字段：存前端/人工补充的非结构化信息（备注、标签等）。
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)

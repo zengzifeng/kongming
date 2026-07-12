@@ -14,6 +14,7 @@ import type {
   ResourceDashboard,
   RevenueAnalysis,
   RevenueAttribution,
+  RevenueDashboard,
   SyncBatch,
   UnknownRecord,
   VendorQuota,
@@ -210,7 +211,9 @@ const policyRuns: PolicyRun[] = [
   { id: 401, run_no: 'RUN-20260628-001', triggered_by: 'system', algorithm: 'realtime', input_hash: 'run-input-001', status: 'success', started_at: '2026-06-28T08:00:00+08:00', finished_at: '2026-06-28T08:00:12+08:00', duration_ms: 12430, error_message: null, created_at: '2026-06-28T08:00:00+08:00', updated_at: now },
   { id: 402, run_no: 'RUN-20260628-002', triggered_by: 'frontend', algorithm: 'off_peak', input_hash: 'run-input-002', status: 'running', started_at: '2026-06-28T10:20:00+08:00', finished_at: null, duration_ms: null, error_message: null, created_at: '2026-06-28T10:20:00+08:00', updated_at: now },
   { id: 403, run_no: 'RUN-20260627-006', triggered_by: 'system', algorithm: 'peak_shaving', input_hash: 'run-input-003', status: 'success', started_at: '2026-06-27T23:00:00+08:00', finished_at: '2026-06-27T23:00:19+08:00', duration_ms: 19120, error_message: null, created_at: '2026-06-27T23:00:00+08:00', updated_at: now },
+  { id: 404, run_no: 'RUN-20260628-004', triggered_by: 'frontend', algorithm: 'demand_evaluation', input_hash: 'run-input-004', status: 'success', started_at: '2026-06-28T10:26:00+08:00', finished_at: '2026-06-28T10:26:02+08:00', duration_ms: 2180, error_message: null, created_at: '2026-06-28T10:26:00+08:00', updated_at: now },
 ];
+
 
 const policies: Policy[] = [
   {
@@ -233,10 +236,51 @@ const policies: Policy[] = [
     updated_at: now,
   },
   {
+    id: 506,
+    policy_run_id: 404,
+    policy_no: 'POL-DEMAND-0628E',
+    algorithm: 'demand_evaluation',
+    summary_json: {
+      template: '需求评估策略',
+      module: 'demand_evaluation',
+      demand_id: 101,
+      report_id: 'DR-20260628-001',
+      evaluation_id: 201,
+      demand_strategy_id: 'DES-DR-20260628-001',
+      customer_id: 88001,
+      model: 'ERNIE-4.5-Turbo',
+      expected_tpm: 420000,
+      expected_rpm: 6800,
+      feasibility_score: 0.91,
+
+      benefit_score: 0.94,
+      expected_margin: 500000,
+      expected_revenue: 1286000,
+      expected_cost: 786000,
+      recommendation: 'manual_review',
+      demand_status: 'awaiting_approval',
+      target: '金融客户峰值保障需求评估',
+      window: '2026-06-29 09:00 - 2026-07-28 23:59',
+    },
+    expected_revenue_gain: 500000,
+    expected_peak_shaving_gain: 0,
+    expected_off_peak_gain: 0,
+    constraints_json: { min_feasibility_score: 0.7, min_benefit_score: 0.7, decision: 'manual_confirm_required' },
+    status: 'draft',
+    accepted_by: null,
+    accepted_at: null,
+    cancel_reason: null,
+    effective_from: '2026-06-29T09:00:00+08:00',
+    effective_to: '2026-07-28T23:59:59+08:00',
+    created_at: '2026-06-28T10:26:02+08:00',
+    updated_at: now,
+  },
+  {
     id: 502,
     policy_run_id: 403,
     policy_no: 'POL-OFFPEAK-0627B',
     algorithm: 'off_peak',
+
     summary_json: { template: '闲忙时策略', target: '教育批处理任务迁移', window: '00:00-07:00' },
     expected_revenue_gain: 132000,
     expected_peak_shaving_gain: 22000,
@@ -316,19 +360,22 @@ const policyActions: PolicyAction[] = [
   { id: 603, policy_id: 502, action_type: 'shift_to_off_peak', payload_json: { from: '14:00-18:00', to: '00:00-07:00', demand_ids: [102] }, expected_gain: 76000, created_at: now, updated_at: now },
   { id: 604, policy_id: 503, action_type: 'soft_throttle', payload_json: { model: 'ERNIE-Lite', ratio: 0.08 }, expected_gain: 88000, created_at: now, updated_at: now },
   { id: 605, policy_id: 504, action_type: 'reserve_capacity', payload_json: { node_group: 'embedding-pool', tpm: 120000 }, expected_gain: 64000, created_at: now, updated_at: now },
+  { id: 609, policy_id: 506, action_type: 'demand_evaluation_plan', payload_json: { demand_id: 101, report_id: 'DR-20260628-001', evaluation_id: 201, customer_id: 88001, model: 'ERNIE-4.5-Turbo', expected_tpm: 420000, feasibility_score: 0.91, benefit_score: 0.94, expected_revenue: 1286000, expected_cost: 786000, expected_margin: 500000, recommendation: 'manual_review' }, expected_gain: 500000, created_at: now, updated_at: now },
   { id: 606, policy_id: 505, action_type: 'rebalance_machine_flow', payload_json: { from: 'GLM-5.2', to: 'kimi-k2.5-nvfp4-mihayou', machines: 10, gain_yuan_day: 17576 }, expected_gain: 17576, created_at: now, updated_at: now },
+
   { id: 607, policy_id: 505, action_type: 'rebalance_machine_flow', payload_json: { from: 'GLM-5.2', to: 'GLM-5.1-FP8', machines: 12, gain_yuan_day: 16643 }, expected_gain: 16643, created_at: now, updated_at: now },
   { id: 608, policy_id: 505, action_type: 'rebalance_machine_flow', payload_json: { from: 'GLM-5.1-KSCC', to: 'kimi-k2.6-mihayou', machines: 1, gain_yuan_day: 683 }, expected_gain: 683, created_at: now, updated_at: now },
 ];
 
 const vendorQuotas: VendorQuota[] = [
-  { id: 701, vendor: '百度', model: 'glm-5.2', quota_tpm: 12000000, actual_tpm: 0, actual_redundant_tpm: 12000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.75, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1200 万 TPM', raw_json: { source: 'manual-image', quota_w: 1200 }, created_at: now, updated_at: now },
-  { id: 702, vendor: '鼎鼎方游（腾讯渠道）', model: 'glm-5.2', quota_tpm: 50000000, actual_tpm: 0, actual_redundant_tpm: 50000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.73, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 5000 万 TPM', raw_json: { source: 'manual-image', quota_w: 5000 }, created_at: now, updated_at: now },
-  { id: 703, vendor: '香港锦望', model: 'glm-5.2', quota_tpm: 10000000, actual_tpm: 0, actual_redundant_tpm: 10000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.55, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1000 万 TPM', raw_json: { source: 'manual-image', quota_w: 1000 }, created_at: now, updated_at: now },
-  { id: 704, vendor: '月暗原厂', model: 'kimi-k2.5', quota_tpm: 60000000, actual_tpm: 0, actual_redundant_tpm: 60000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.8, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 6000 万 TPM', raw_json: { source: 'manual-image', quota_w: 6000 }, created_at: now, updated_at: now },
-  { id: 705, vendor: '月暗原厂', model: 'kimi-k2.6', quota_tpm: 100000000, actual_tpm: 0, actual_redundant_tpm: 100000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.8, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 10000 万 TPM', raw_json: { source: 'manual-image', quota_w: 10000 }, created_at: now, updated_at: now },
-  { id: 706, vendor: '百度', model: 'deepseek-v32', quota_tpm: 12000000, actual_tpm: 0, actual_redundant_tpm: 12000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.4, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1200 万 TPM', raw_json: { source: 'manual-image', quota_w: 1200 }, created_at: now, updated_at: now },
+  { id: 701, vendor: '百度', model: 'glm-5.2', quota_tpm: 12000000, actual_tpm: 0, actual_redundant_tpm: 12000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.75, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1200 万 TPM', raw_json: { source: 'manual-image', provider: 'thirdparty-baidu-ofb', quota_w: 1200, 供应商总量_W: 1200, 实际占用总量_W: 0 }, created_at: now, updated_at: now },
+  { id: 702, vendor: '鼎鼎方游', model: 'glm-5.2', quota_tpm: 50000000, actual_tpm: 0, actual_redundant_tpm: 50000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.73, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 5000 万 TPM', raw_json: { source: 'manual-image', provider: 'thirdparty-ddfy-openai', quota_w: 5000, 供应商总量_W: 5000, 实际占用总量_W: 0 }, created_at: now, updated_at: now },
+  { id: 703, vendor: '香港锦望', model: 'glm-5.2', quota_tpm: 10000000, actual_tpm: 0, actual_redundant_tpm: 10000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.55, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1000 万 TPM', raw_json: { source: 'manual-image', provider: 'thirdparty-hkjw-openai', quota_w: 1000, 供应商总量_W: 1000, 实际占用总量_W: 0 }, created_at: now, updated_at: now },
+  { id: 704, vendor: '月暗原厂', model: 'kimi-k2.5', quota_tpm: 60000000, actual_tpm: 0, actual_redundant_tpm: 60000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.8, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 6000 万 TPM', raw_json: { source: 'manual-image', provider: 'thirdparty-kimi-fc', quota_w: 6000, 供应商总量_W: 6000, 实际占用总量_W: 0 }, created_at: now, updated_at: now },
+  { id: 705, vendor: '月暗原厂', model: 'kimi-k2.6', quota_tpm: 100000000, actual_tpm: 0, actual_redundant_tpm: 100000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.8, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 10000 万 TPM', raw_json: { source: 'manual-image', provider: 'thirdparty-kimi-fc', quota_w: 10000, 供应商总量_W: 10000, 实际占用总量_W: 0 }, created_at: now, updated_at: now },
+  { id: 706, vendor: '百度', model: 'deepseek-v32', quota_tpm: 12000000, actual_tpm: 0, actual_redundant_tpm: 12000000, unit_cost: 0, unit_price: 0, purchase_discount: 0.4, effective_from: '2026-07-12T00:00:00+08:00', effective_to: null, status: 'active', contact: null, notes: '供应量级 1200 万 TPM', raw_json: { source: 'manual-image', provider: 'thirdparty-baidu-ofb', quota_w: 1200, 供应商总量_W: 1200, 实际占用总量_W: 0 }, created_at: now, updated_at: now },
 ];
+
 
 const resourceDashboard: ResourceDashboard = {
   captured_at: now,
@@ -370,6 +417,25 @@ const revenueAttributions: RevenueAttribution[] = [
   { id: 1002, policy_id: 502, mechanism: 'off_peak_shift', project_code: 'EDU-BATCH', project_name: '教育批处理迁移', revenue_delta: 84000, cost_delta: 32000, margin_delta: 52000, allocation_ratio: 0.64, computed_at: now, created_at: now, updated_at: now },
   { id: 1003, policy_id: 503, mechanism: 'peak_shaving', project_code: 'COMMON-PEAK', project_name: '公共峰值削减', revenue_delta: 70000, cost_delta: 21000, margin_delta: 49000, allocation_ratio: 0.71, computed_at: now, created_at: now, updated_at: now },
 ];
+
+const revenueDashboard: RevenueDashboard = {
+  generated_at: now,
+  idle: [
+    { id: 1101, date: '2026-07-10', customer_name: '教育云批改', model_name: 'ERNIE-Speed-128K', sale_discount: 0.92, purchase_discount: 0.74, self_incremental_revenue: 38600, vendor_cost_reduction: 21800, total_revenue: 60400, price_per_million_tokens: 18.6 },
+    { id: 1102, date: '2026-07-11', customer_name: '金融客服中台', model_name: 'ERNIE-4.5-Turbo', sale_discount: 0.88, purchase_discount: 0.72, self_incremental_revenue: 45200, vendor_cost_reduction: 26300, total_revenue: 71500, price_per_million_tokens: 27.4 },
+    { id: 1103, date: '2026-07-12', customer_name: '内容审核平台', model_name: 'ERNIE-Lite', sale_discount: 0.95, purchase_discount: 0.68, self_incremental_revenue: 18400, vendor_cost_reduction: 12200, total_revenue: 30600, price_per_million_tokens: 9.8 },
+  ],
+  busy: [
+    { id: 1201, date: '2026-07-10', customer_name: '营销活动问答', model_name: 'ERNIE-4.5-Turbo', sale_discount: 0.86, purchase_discount: 0.78, self_incremental_revenue: 52800, vendor_cost_reduction: 17600, total_revenue: 70400, price_per_million_tokens: 31.2 },
+    { id: 1202, date: '2026-07-11', customer_name: '游戏实时陪伴', model_name: 'kimi-k2.5-nvfp4-mihayou', sale_discount: 0.9, purchase_discount: 0.8, self_incremental_revenue: 41100, vendor_cost_reduction: 14300, total_revenue: 55400, price_per_million_tokens: 24.7 },
+    { id: 1203, date: '2026-07-12', customer_name: '企业知识助手', model_name: 'GLM-5.1-FP8', sale_discount: 0.89, purchase_discount: 0.73, self_incremental_revenue: 33700, vendor_cost_reduction: 11900, total_revenue: 45600, price_per_million_tokens: 21.5 },
+  ],
+  peak_shaving: [
+    { id: 1301, date: '2026-07-10', customer_name: '公共峰值池', model_name: 'ERNIE-4.5-Turbo', peak_tpm_before: 1680000, peak_watermark: 0.82, saved_tpm: 260000, machines_before: 42, machines_after: 36, self_cost_reduction: 36800, vendor_cost_increase: 9200, directed_shift_revenue: 22400 },
+    { id: 1302, date: '2026-07-11', customer_name: '金融客服中台', model_name: 'ERNIE-Speed-128K', peak_tpm_before: 1240000, peak_watermark: 0.78, saved_tpm: 180000, machines_before: 31, machines_after: 27, self_cost_reduction: 28400, vendor_cost_increase: 7600, directed_shift_revenue: 16800 },
+    { id: 1303, date: '2026-07-12', customer_name: '游戏实时陪伴', model_name: 'kimi-k2.6-mihayou', peak_tpm_before: 980000, peak_watermark: 0.8, saved_tpm: 120000, machines_before: 24, machines_after: 21, self_cost_reduction: 21600, vendor_cost_increase: 6800, directed_shift_revenue: 14200 },
+  ],
+};
 
 function getRevenueAnalysis(): RevenueAnalysis {
   const items = policies.map((policy, index) => {
@@ -451,10 +517,128 @@ function filterResources(query: { gpu_model?: string; datacenter?: string }) {
   });
 }
 
+function latestEvaluationForDemand(demandId: number) {
+  return evaluations.filter((item) => item.demand_id === demandId).sort((a, b) => b.id - a.id)[0] || null;
+}
+
+function demandEvaluationPolicyForDemand(demandId: number) {
+  return policies.find((item) => item.algorithm === 'demand_evaluation' && item.summary_json?.demand_id === demandId) || null;
+}
+
+function createDemandEvaluationPolicy(demand: Demand, evaluation: Evaluation, run: PolicyRun): Policy {
+  const nextPolicyId = Math.max(0, ...policies.map((item) => item.id)) + 1;
+  const policyNo = `POL-DEMAND-${String(demand.id).padStart(4, '0')}`;
+  const policy: Policy = {
+    id: nextPolicyId,
+    policy_run_id: run.id,
+    policy_no: policyNo,
+    algorithm: 'demand_evaluation',
+    summary_json: {
+      template: '需求评估策略',
+      module: 'demand_evaluation',
+      demand_id: demand.id,
+      report_id: demand.report_id,
+      evaluation_id: evaluation.id,
+      demand_strategy_id: `DES-${demand.report_id}`,
+      customer_id: demand.customer_id,
+      model: demand.model_name,
+      expected_tpm: demand.expected_tpm,
+      expected_rpm: demand.expected_rpm,
+      feasibility_score: evaluation.feasibility_score,
+
+      benefit_score: evaluation.customer_value_score,
+      expected_margin: evaluation.expected_margin,
+      expected_revenue: evaluation.expected_revenue,
+      expected_cost: evaluation.expected_cost,
+      recommendation: evaluation.recommendation,
+      demand_status: demand.status,
+      target: `${demand.report_id} 需求评估`,
+      window: `${demand.expected_start_at || '待定'} - ${demand.expected_end_at || '长期'}`,
+    },
+    expected_revenue_gain: evaluation.expected_margin,
+    expected_peak_shaving_gain: 0,
+    expected_off_peak_gain: 0,
+    constraints_json: { min_feasibility_score: 0.7, min_benefit_score: 0.7, decision: 'manual_confirm_required' },
+    status: 'draft',
+    accepted_by: null,
+    accepted_at: null,
+    cancel_reason: null,
+    effective_from: demand.expected_start_at,
+    effective_to: demand.expected_end_at,
+    created_at: now,
+    updated_at: now,
+  };
+  policies.unshift(policy);
+  policyActions.unshift({
+    id: Math.max(0, ...policyActions.map((item) => item.id)) + 1,
+    policy_id: policy.id,
+    action_type: 'demand_evaluation_plan',
+    payload_json: {
+      demand_id: demand.id,
+      report_id: demand.report_id,
+      evaluation_id: evaluation.id,
+      customer_id: demand.customer_id,
+      model: demand.model_name,
+      expected_tpm: demand.expected_tpm,
+      feasibility_score: evaluation.feasibility_score,
+      benefit_score: evaluation.customer_value_score,
+      expected_revenue: evaluation.expected_revenue,
+      expected_cost: evaluation.expected_cost,
+      expected_margin: evaluation.expected_margin,
+      recommendation: evaluation.recommendation,
+    },
+    expected_gain: evaluation.expected_margin,
+    created_at: now,
+    updated_at: now,
+  });
+  return policy;
+}
+
+function ensureDemandEvaluationPolicy(demand: Demand, evaluation: Evaluation): Policy {
+  const existing = demandEvaluationPolicyForDemand(demand.id);
+  if (existing) return existing;
+  const run: PolicyRun = {
+    id: Math.max(0, ...policyRuns.map((item) => item.id)) + 1,
+    run_no: `RUN-DEMAND-${String(demand.id).padStart(4, '0')}`,
+    triggered_by: 'frontend',
+    algorithm: 'demand_evaluation',
+    input_hash: `demand-evaluation-${demand.id}-${evaluation.id}`,
+    status: 'success',
+    started_at: now,
+    finished_at: now,
+    duration_ms: 960,
+    error_message: null,
+    created_at: now,
+    updated_at: now,
+  };
+  policyRuns.unshift(run);
+  return createDemandEvaluationPolicy(demand, evaluation, run);
+}
+
+function syncDemandDecision(policy: Policy, accepted: boolean, operator: string, reason?: string) {
+  const demandId = Number(policy.summary_json?.demand_id || 0);
+  const evaluationId = Number(policy.summary_json?.evaluation_id || 0);
+  const demand = demands.find((item) => item.id === demandId);
+  const evaluation = evaluations.find((item) => item.id === evaluationId) || (demand ? latestEvaluationForDemand(demand.id) : null);
+  const decidedStatus = accepted ? 'approved' : 'rejected';
+  if (demand) Object.assign(demand, { status: decidedStatus, updated_at: now });
+  if (evaluation) {
+    Object.assign(evaluation, {
+      status: decidedStatus,
+      decided_by: operator,
+      decided_at: now,
+      decided_reason: reason || (accepted ? '策略方案已确认' : '策略方案已驳回'),
+      updated_at: now,
+    });
+  }
+  policy.summary_json = { ...policy.summary_json, demand_status: decidedStatus, decided_by: operator, decided_reason: reason || null };
+}
+
 function getPolicyDetail(id: number): PolicyDetail {
   const policy = findById(policies, id, 'Policy');
   return clone({ policy, actions: policyActions.filter((action) => action.policy_id === policy.id) });
 }
+
 
 function getReport(type: 'weekly' | 'monthly', period?: string) {
   const totalRevenue = policies.reduce((sum, item) => sum + item.expected_revenue_gain, 0);
@@ -522,40 +706,62 @@ export const mockApi = {
   },
   demands: {
     list: async (query: QueryParams): Promise<Paginated<Demand>> => paginate(filterDemands(query), query),
-    detail: async (id: number): Promise<DemandDetail> => clone({ demand: findById(demands, id, 'Demand'), latest_evaluation: evaluations.find((item) => item.demand_id === id) || null }),
+    detail: async (id: number): Promise<DemandDetail> => clone({ demand: findById(demands, id, 'Demand'), latest_evaluation: latestEvaluationForDemand(id) }),
+
     patch: async (id: number, body: UnknownRecord): Promise<Demand> => {
       const demand = findById(demands, id, 'Demand');
       Object.assign(demand, body, { updated_at: now });
       return clone(demand);
     },
     evaluate: async (id: number, force = false): Promise<Evaluation> => {
-      const existing = evaluations.find((item) => item.demand_id === id);
-      if (existing) return clone(existing);
-      const evaluation: Evaluation = { id: Math.max(...evaluations.map((item) => item.id)) + 1, demand_id: id, feasibility_score: 0.82, customer_value_score: 0.8, expected_revenue: 300000, expected_cost: 190000, expected_margin: 110000, factors_json: { generated_by: 'mock', force }, recommendation: 'manual_review', status: 'pending', decided_by: null, decided_at: null, decided_reason: null, created_at: now, updated_at: now };
-      evaluations.unshift(evaluation);
+      const demand = findById(demands, id, 'Demand');
+      const existing = latestEvaluationForDemand(id);
+      const evaluation = existing || { id: Math.max(0, ...evaluations.map((item) => item.id)) + 1, demand_id: id, feasibility_score: 0.82, customer_value_score: 0.8, expected_revenue: 300000, expected_cost: 190000, expected_margin: 110000, factors_json: { generated_by: 'mock', force }, recommendation: 'manual_review', status: 'pending', decided_by: null, decided_at: null, decided_reason: null, created_at: now, updated_at: now };
+      if (!existing) evaluations.unshift(evaluation);
+      if (!['approved', 'rejected'].includes(evaluation.status)) Object.assign(evaluation, { status: 'pending', updated_at: now });
+      Object.assign(demand, { status: 'evaluating', updated_at: now });
+      ensureDemandEvaluationPolicy(demand, evaluation);
       return clone(evaluation);
     },
+
   },
   evaluations: {
     list: async (query: QueryParams): Promise<Paginated<Evaluation>> => paginate(filterEvaluations(query), query),
     detail: async (id: number): Promise<Evaluation> => clone(findById(evaluations, id, 'Evaluation')),
     approve: async (id: number, body: { operator: string; comment?: string }): Promise<Evaluation> => {
       const evaluation = findById(evaluations, id, 'Evaluation');
+      const demand = demands.find((item) => item.id === evaluation.demand_id);
       Object.assign(evaluation, { status: 'approved', decided_by: body.operator, decided_at: now, decided_reason: body.comment || '同意评估结论', updated_at: now });
+      if (demand) Object.assign(demand, { status: 'approved', updated_at: now });
       return clone(evaluation);
     },
     reject: async (id: number, body: { operator: string; reason: string }): Promise<Evaluation> => {
       const evaluation = findById(evaluations, id, 'Evaluation');
+      const demand = demands.find((item) => item.id === evaluation.demand_id);
       Object.assign(evaluation, { status: 'rejected', decided_by: body.operator, decided_at: now, decided_reason: body.reason, updated_at: now });
+      if (demand) Object.assign(demand, { status: 'rejected', updated_at: now });
       return clone(evaluation);
     },
+
   },
   policies: {
     createRun: async (body: { algorithm: string; demand_ids?: number[]; params?: UnknownRecord | null }): Promise<PolicyRun> => {
-      const run: PolicyRun = { id: Math.max(...policyRuns.map((item) => item.id)) + 1, run_no: `RUN-20260628-${String(policyRuns.length + 1).padStart(3, '0')}`, triggered_by: 'frontend', algorithm: body.algorithm, input_hash: `run-input-${policyRuns.length + 1}`, status: 'running', started_at: now, finished_at: null, duration_ms: null, error_message: null, created_at: now, updated_at: now };
+      const run: PolicyRun = { id: Math.max(0, ...policyRuns.map((item) => item.id)) + 1, run_no: `RUN-20260628-${String(policyRuns.length + 1).padStart(3, '0')}`, triggered_by: 'frontend', algorithm: body.algorithm, input_hash: `run-input-${policyRuns.length + 1}`, status: body.algorithm === 'demand_evaluation' ? 'success' : 'running', started_at: now, finished_at: body.algorithm === 'demand_evaluation' ? now : null, duration_ms: body.algorithm === 'demand_evaluation' ? 960 : null, error_message: null, created_at: now, updated_at: now };
       policyRuns.unshift(run);
+      if (body.algorithm === 'demand_evaluation') {
+        const demandIds = body.demand_ids?.length ? body.demand_ids : demands.filter((item) => ['pending', 'evaluating', 'awaiting_approval'].includes(item.status)).map((item) => item.id);
+        demandIds.forEach((demandId) => {
+          const demand = demands.find((item) => item.id === demandId);
+          if (!demand) return;
+          const evaluation = latestEvaluationForDemand(demand.id) || { id: Math.max(0, ...evaluations.map((item) => item.id)) + 1, demand_id: demand.id, feasibility_score: 0.82, customer_value_score: 0.8, expected_revenue: Math.round(demand.expected_tpm * 0.72), expected_cost: Math.round(demand.expected_tpm * 0.46), expected_margin: Math.round(demand.expected_tpm * 0.26), factors_json: { generated_by: 'mock_policy_run' }, recommendation: 'manual_review', status: 'pending', decided_by: null, decided_at: null, decided_reason: null, created_at: now, updated_at: now };
+          if (!evaluations.some((item) => item.id === evaluation.id)) evaluations.unshift(evaluation);
+          Object.assign(demand, { status: 'evaluating', updated_at: now });
+          if (!demandEvaluationPolicyForDemand(demand.id)) createDemandEvaluationPolicy(demand, evaluation, run);
+        });
+      }
       return clone(run);
     },
+
     runs: async (query: QueryParams): Promise<Paginated<PolicyRun>> => paginate(policyRuns, query),
     run: async (id: number): Promise<PolicyRun> => clone(findById(policyRuns, id, 'Policy run')),
     snapshot: async (id: number): Promise<UnknownRecord> => clone({ run: findById(policyRuns, id, 'Policy run'), demands: demands.slice(0, 3), resources: resourceDashboard.nodes.slice(0, 2), constraints: { min_margin: 0.25, protect_p0: true } }),
@@ -569,16 +775,21 @@ export const mockApi = {
     accept: async (id: number, body: { operator: string; effective_from?: string; comment?: string }): Promise<Policy> => {
       const policy = findById(policies, id, 'Policy');
       Object.assign(policy, { status: 'accepted', accepted_by: body.operator, accepted_at: now, effective_from: body.effective_from || policy.effective_from, updated_at: now });
+      if (policy.algorithm === 'demand_evaluation') syncDemandDecision(policy, true, body.operator, body.comment);
       return clone(policy);
     },
+
     recalculate: async (_id?: number, _params?: UnknownRecord | null): Promise<PolicyRun> => mockApi.policies.createRun({ algorithm: 'realtime', params: _params }),
     cancel: async (id: number, body: { operator: string; reason: string }): Promise<Policy> => {
       const policy = findById(policies, id, 'Policy');
       Object.assign(policy, { status: 'cancelled', cancel_reason: body.reason || `cancelled by ${body.operator}`, updated_at: now });
+      if (policy.algorithm === 'demand_evaluation') syncDemandDecision(policy, false, body.operator, body.reason);
       return clone(policy);
     },
+
   },
   revenue: {
+    dashboard: async (): Promise<RevenueDashboard> => clone(revenueDashboard),
     attributions: async (query: QueryParams): Promise<Paginated<RevenueAttribution>> => paginate(revenueAttributions, query),
     policyRevenue: async (policyId: number): Promise<UnknownRecord> => clone({ policy_id: policyId, attributions: revenueAttributions.filter((item) => item.policy_id === policyId), analysis: getRevenueAnalysis().items.find((item) => item.policy_id === policyId) }),
     analysis: async (): Promise<RevenueAnalysis> => getRevenueAnalysis(),
