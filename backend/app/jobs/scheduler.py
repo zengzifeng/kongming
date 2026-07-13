@@ -8,7 +8,7 @@ from .revenue_jobs import customer_usage_daily, revenue_after_snapshot
 from .report_jobs import monthly_report, weekly_report
 from .sync_filing_jobs import sync_filings_hourly
 from .policy_jobs import policy_auto_run
-from .monitor_jobs import resource_monitor_collect
+from .monitor_jobs import resource_monitor_collect, usage_hourly_aggregate
 
 
 # 任务名 -> 可调用（均接受 app 作为首参；额外参数由 job_schedules.args_json 提供）。
@@ -20,6 +20,7 @@ JOB_REGISTRY = {
     "monthly_report": monthly_report,
     "policy_auto_run": policy_auto_run,
     "resource_monitor_collect": resource_monitor_collect,
+    "usage_hourly_aggregate": usage_hourly_aggregate,
 }
 
 # 默认调度配置：首次启动时 seed 到 job_schedules 表（幂等，不覆盖已存在项）。
@@ -40,6 +41,8 @@ DEFAULT_SCHEDULES = [
      "args_json": {"algorithm": "time_period"}},
     {"job_name": "resource_monitor_collect", "description": "资源模型监控数据采集（每小时）",
      "trigger_type": "cron", "cron_expr": "5 * * * *"},
+    {"job_name": "usage_hourly_aggregate", "description": "consumer_model_tpm 小时聚合写入 usage_hourly",
+     "trigger_type": "cron", "cron_expr": "10 * * * *"},
 ]
 
 

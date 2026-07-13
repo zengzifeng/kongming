@@ -1,5 +1,5 @@
 from .base import BaseModel
-from .resource import ClusterResource
+from .cluster_capacity import ClusterCapacity
 from .sync_batch import SyncBatch
 from .raw_filing import RawFiling
 from .demand import Demand, DemandStatus
@@ -20,6 +20,7 @@ from .job_log import JobLog
 from .job_schedule import JobSchedule, JobTriggerType
 from .monitor_batch import MonitorBatch, MonitorBatchStatus
 from .monitor_consumer import MonitorConsumer
+from .provider_mapping import ProviderMapping
 from .cluster_model_tpm import ClusterModelTpm
 from .consumer_model_tpm import ConsumerModelTpm
 from .gpu_node_count import GpuNodeCount
@@ -36,7 +37,7 @@ from .fitting import (
 
 __all__ = [
     "BaseModel",
-    "ClusterResource",
+    "ClusterCapacity",
     "SyncBatch",
     "RawFiling",
     "Demand",
@@ -69,6 +70,7 @@ __all__ = [
     "MonitorBatch",
     "MonitorBatchStatus",
     "MonitorConsumer",
+    "ProviderMapping",
     "ClusterModelTpm",
     "ConsumerModelTpm",
     "GpuNodeCount",

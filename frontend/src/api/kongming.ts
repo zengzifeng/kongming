@@ -2,6 +2,7 @@ import { apiClient } from './client';
 import type {
   AlertItem,
   ClusterTpmSnapshot,
+  ConsumerTpmOptions,
   ConsumerTpmSnapshot,
   DashboardOperations,
   Demand,
@@ -106,8 +107,9 @@ export const vendorsApi = {
 
 export const monitorApi = {
   clusterTpm: (): Promise<MonitorSnapshot<ClusterTpmSnapshot>> => apiClient.get('/api/v1/monitor/cluster-tpm'),
-  consumerTpm: (query: { ai_consumer?: string; ai_model?: string } = {}): Promise<MonitorSnapshot<ConsumerTpmSnapshot>> =>
+  consumerTpm: (query: { ai_consumer?: string; ai_model?: string; customer_code?: string; start_time?: string; end_time?: string } = {}): Promise<MonitorSnapshot<ConsumerTpmSnapshot>> =>
     apiClient.get('/api/v1/monitor/consumer-tpm', query),
+  consumerTpmOptions: (): Promise<ConsumerTpmOptions> => apiClient.get('/api/v1/monitor/consumer-tpm/options'),
 };
 
 export const fittingsApi = {

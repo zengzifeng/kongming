@@ -27,7 +27,7 @@ from app.extensions import db  # noqa: E402
 from app.utils.model_name import normalize_model_name  # noqa: E402
 from app.models import (  # noqa: E402
     MonitorConsumer,
-    ClusterResource,
+    ClusterCapacity,
     VendorQuota,
     ModelListPrice,
     CustomerSellDiscount,
@@ -79,25 +79,22 @@ def clear_mock_customers():
 
 
 def ingest_clusters(wb):
-    ClusterResource.query.delete()
+    ClusterCapacity.query.delete()
     rows = read_sheet(wb, "自建集群信息")
+    seen: set[str] = set()
+    written = 0
     for r in rows:
-        db.session.add(ClusterResource(
-            snapshot_date=SNAPSHOT_DATE,
-            cluster_name=str(r["自建集群名称"]),
-            deployed_model=normalize_model_name(r["部署模型名称"]),
-            machine_count=int(_num(r["部署机器台数"])),
-            # 承接能力单位为「万TPM」，换算为绝对 TPM 存库；原始 wTPM 值留档 raw_json。
+        name = str(r["自建集群名称"])
+        if name.lower() in seen:
+            continue  # cluster_name 唯一（大小写不敏感）
+        seen.add(name.lower())
+        db.session.add(ClusterCapacity(
+            cluster_name=name,
+            # 单台承接能力单位为「万TPM」，换算为绝对 TPM 存库。
             tpm_per_machine=_num(r["单台承接能力TPM"]) * WTPM,
-            total_capacity_tpm=_num(r["总承接能力TPM"]) * WTPM,
-            raw_json={
-                "provider": r["provider"],
-                "单台承接能力_wTPM": r["单台承接能力TPM"],
-                "总承接能力_wTPM": r["总承接能力TPM"],
-                "source": "平台输入.自建集群信息",
-            },
         ))
-    print(f"[cluster_resources] 清空 mock，写入 {len(rows)} 行")
+        written += 1
+    print(f"[cluster_capacities] 清空旧数据，写入 {written} 行")
 
 
 def ingest_vendors(wb):
@@ -176,7 +173,7 @@ def main():
         db.session.commit()
         print("\n[done] 各表现有行数：")
         for label, model in [
-            ("cluster_resources", ClusterResource),
+            ("cluster_capacities", ClusterCapacity),
             ("vendor_quotas", VendorQuota),
             ("model_list_prices", ModelListPrice),
             ("customer_sell_discounts", CustomerSellDiscount),

@@ -319,6 +319,12 @@ export interface MonitorSnapshot<T> {
   items: T[];
 }
 
+export interface ConsumerTpmOptions {
+  ai_models: string[];
+  ai_consumers: string[];
+  customer_codes: string[];
+}
+
 export interface FittingAlgorithm extends BaseEntity {
   algo_name: string;
   display_name: string;
@@ -329,7 +335,7 @@ export interface FittingAlgorithm extends BaseEntity {
 }
 
 export interface FittingConfig extends BaseEntity {
-  customer_code: string;
+  ai_consumer: string;
   model_name: string;
   period: 'idle' | 'busy';
   algo_name: string;
@@ -339,11 +345,11 @@ export interface FittingConfig extends BaseEntity {
 
 export interface FittingResult extends BaseEntity {
   level: 'customer' | 'cluster';
-  customer_code: string | null;
+  ai_consumer: string | null;
   cluster_name: string | null;
   model_name: string;
   period: 'idle' | 'busy';
-  algo_name: string;
+  algo_name: string | null;
   generated_at: string;
   series_json: Array<[string, number]>;
   meta_json: Record<string, unknown>;

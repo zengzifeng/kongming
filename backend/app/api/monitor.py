@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from flask import Blueprint, request
 from pydantic import BaseModel, Field
 
@@ -107,28 +109,61 @@ def latest_cluster_tpm():
     })
 
 
-@bp.get("/monitor/consumer-tpm")
+@bp.get("/monitor/consumer-tpm/options")
+def consumer_tpm_options():
+    """客户模型跑量图筛选项，来自已落库的监控快照。"""
+    return success({
+        "ai_models": _distinct_values(ConsumerModelTpm.ai_model),
+        "ai_consumers": _distinct_values(ConsumerModelTpm.ai_consumer),
+        "customer_codes": _distinct_values(ConsumerModelTpm.customer_code),
+    })
 
+
+@bp.get("/monitor/consumer-tpm")
 def latest_consumer_tpm():
-    """最新采集批次的客户×模型瞬时 TPM（可按 ai_consumer / ai_model 过滤，取各组合最后时间点）。"""
-    batch_id = _latest_batch_id()
-    if batch_id is None:
-        return success({"batch_id": None, "items": []})
+    """客户×模型 TPM；传 start_time/end_time 时返回范围序列，否则返回最新批次每组合最后一点。"""
     ai_consumer = request.args.get("ai_consumer")
     ai_model = request.args.get("ai_model")
-    stmt = db.select(ConsumerModelTpm).where(ConsumerModelTpm.batch_id == batch_id)
+    customer_code = request.args.get("customer_code")
+    start_time = _parse_datetime_arg("start_time")
+    end_time = _parse_datetime_arg("end_time")
+
+    stmt = db.select(ConsumerModelTpm)
+    if start_time or end_time:
+        if start_time:
+            stmt = stmt.where(ConsumerModelTpm.data_time >= start_time)
+        if end_time:
+            stmt = stmt.where(ConsumerModelTpm.data_time <= end_time)
+    else:
+        batch_id = _latest_batch_id()
+        if batch_id is None:
+            return success({"batch_id": None, "items": []})
+        stmt = stmt.where(ConsumerModelTpm.batch_id == batch_id)
+
     if ai_consumer:
         stmt = stmt.where(ConsumerModelTpm.ai_consumer == ai_consumer)
     if ai_model:
         stmt = stmt.where(ConsumerModelTpm.ai_model == ai_model)
-    stmt = stmt.order_by(ConsumerModelTpm.data_time.asc())
-    rows = db.session.execute(stmt).scalars().all()
-    latest: dict[tuple, ConsumerModelTpm] = {}
-    for r in rows:
-        latest[(r.ai_consumer, r.ai_model)] = r
+    if customer_code:
+        stmt = stmt.where(ConsumerModelTpm.customer_code == customer_code)
+
+    rows = db.session.execute(
+        stmt.order_by(
+            ConsumerModelTpm.data_time.asc(),
+            ConsumerModelTpm.ai_model.asc(),
+            ConsumerModelTpm.ai_consumer.asc(),
+        )
+    ).scalars().all()
+
+    if not (start_time or end_time):
+        latest: dict[tuple, ConsumerModelTpm] = {}
+        for r in rows:
+            latest[(r.ai_consumer, r.ai_model)] = r
+        rows = list(latest.values())
+
     return success({
-        "batch_id": batch_id,
-        "items": [model_to_dict(r) for r in latest.values()],
+        "batch_id": rows[-1].batch_id if rows else None,
+        "items": [model_to_dict(r) for r in rows],
     })
 
 
@@ -136,6 +171,20 @@ def _latest_batch_id() -> int | None:
     return db.session.execute(
         db.select(MonitorBatch.id).order_by(MonitorBatch.id.desc()).limit(1)
     ).scalar_one_or_none()
+
+
+def _distinct_values(column) -> list[str]:
+    rows = db.session.execute(
+        db.select(column).where(column.is_not(None)).distinct().order_by(column.asc())
+    ).scalars().all()
+    return [str(value) for value in rows if value]
+
+
+def _parse_datetime_arg(name: str) -> datetime | None:
+    value = request.args.get(name)
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
 
 
 def _watched_cluster_names() -> set[str]:

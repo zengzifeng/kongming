@@ -11,6 +11,7 @@ from .policy_report_service import PolicyReportService
 from .alert_service import AlertService
 from .job_schedule_service import JobScheduleService
 from .resource_monitor_service import ResourceMonitorService
+from .usage_aggregation_service import UsageAggregationService
 from .wave_fitting_service import WaveFittingService
 from .watched_cluster_service import WatchedClusterService
 
@@ -28,6 +29,7 @@ __all__ = [
     "AlertService",
     "JobScheduleService",
     "ResourceMonitorService",
+    "UsageAggregationService",
     "WaveFittingService",
     "WatchedClusterService",
 ]

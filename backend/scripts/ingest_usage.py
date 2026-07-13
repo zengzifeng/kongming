@@ -1,13 +1,15 @@
-"""一次性录入脚本：将「模型计量使用量明细」中、平台售卖名单内客户的时序跑量
-录入数据库。
+"""录入分客户小时级跑量到 customer_usage_hourly（来源：模型计量使用量明细 xlsx）。
 
-- 客户：按客户名 upsert 到 customers 表（不存在则新建，分配递增 customer_code）
-- 跑量：写入 customer_usage_hourly（时序跑量明细），按自然键幂等去重
+口径：
+- 明细「数据时间」已是整点小时；按 (客户, 数据时间, 模型, provider) 聚合求和 token 指标，
+  落成一条 hourly（自然键与表一致）。
+- 仅保留：客户名 ∈ monitor_consumers（存在的客户）且 provider ∈ provider_mappings（存在的 provider）。
+- model 统一规范化为小写；model_source/data_source 取明细原值；user_id 暂空。
 
-用法（在 backend 目录下）：
-    .venv/Scripts/python.exe scripts/ingest_usage.py [路径/明细.xlsx] [路径/平台输入.xlsx]
+只影响明细涉及的这批真实客户的行（先删这批客户旧 hourly 再写），不动 __all__ 等其它行。
 
-默认从仓库根目录读取两个 xlsx。
+用法（backend 目录下）：
+    python scripts/ingest_usage.py [路径/模型计量使用量明细.xlsx]
 """
 import sys
 from datetime import datetime, date
@@ -15,7 +17,6 @@ from pathlib import Path
 
 import openpyxl
 
-# 允许以脚本方式运行时导入 app 包
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
 REPO_ROOT = BACKEND_DIR.parent
@@ -23,10 +24,9 @@ REPO_ROOT = BACKEND_DIR.parent
 from app import create_app  # noqa: E402
 from app.extensions import db  # noqa: E402
 from app.utils.model_name import normalize_model_name  # noqa: E402
-from app.models import MonitorConsumer, CustomerUsageHourly  # noqa: E402
+from app.models import MonitorConsumer, ProviderMapping, CustomerUsageHourly  # noqa: E402
 
-DETAIL_XLSX = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "副本模型计量使用量明细_20260709_232212.xlsx"
-PLATFORM_XLSX = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO_ROOT / "平台输入.xlsx"
+DETAIL_XLSX = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "模型计量使用量明细_20260714_004155.xlsx"
 
 
 def _to_int(v):
@@ -54,127 +54,80 @@ def _to_date(v):
     return datetime.strptime(str(v).strip(), "%Y-%m-%d").date()
 
 
-def load_platform_customers(path: Path) -> set[str]:
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb["售卖"]
-    names = {
-        row[1].strip()
-        for row in ws.iter_rows(min_row=2, values_only=True)
-        if row[1]  # 客户名称
-    }
-    wb.close()
-    return names
-
-
-def load_detail_rows(path: Path, keep_customers: set[str]) -> list[dict]:
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb["Sheet2"]
-    header = [str(h) for h in next(ws.iter_rows(values_only=True))]
+def load_detail(path: Path, name_to_id: dict[str, int], providers: set[str]):
+    """读明细并按 (customer_id, data_time, model, provider) 聚合，返回聚合行列表。"""
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    it = ws.iter_rows(values_only=True)
+    header = [str(h) for h in next(it)]
     idx = {h: i for i, h in enumerate(header)}
-    rows = []
-    for r in ws.iter_rows(min_row=2, values_only=True):
+
+    agg: dict[tuple, dict] = {}
+    total, kept, skip_customer, skip_provider = 0, 0, 0, 0
+    for r in it:
+        total += 1
         name = r[idx["客户名"]]
-        if name is None or name.strip() not in keep_customers:
+        provider = r[idx["provider"]]
+        name = name.strip() if isinstance(name, str) else name
+        provider = provider.strip() if isinstance(provider, str) else provider
+        cid = name_to_id.get(name)
+        if cid is None:
+            skip_customer += 1
             continue
-        rows.append(
-            dict(
-                customer_name=name.strip(),
-                user_id=str(r[idx["用户ID"]]),
-                key_id=str(r[idx["key_id"]]),
-                data_time=_to_dt(r[idx["数据时间"]]),
-                stat_date=_to_date(r[idx["日期"]]),
-                phase=str(r[idx["阶段"]]),
-                model=normalize_model_name(r[idx["模型"]]),
-                provider=str(r[idx["provider"]]),
-                model_source=r[idx["模型来源"]],
-                data_source=r[idx["数据来源"]],
-                output_token=_to_int(r[idx["outputToken"]]),
-                cache_token=_to_int(r[idx["cacheToken"]]),
-                cache_miss_token=_to_int(r[idx["cacheMissToken"]]),
-                total_input=_to_int(r[idx["总输入"]]),
-                input_output=_to_int(r[idx["输入+输出"]]),
-                creation_cache_1h_token=_to_int(r[idx["creationCache1hToken"]]),
-                creation_cache_5m_token=_to_int(r[idx["creationCache5mToken"]]),
-                web_search_fc_count=_to_int(r[idx["webSearchFcCount"]]),
-                av_duration=r[idx["音视频时长"]] or 0,
-                status=r[idx["状态"]],
-                account_type=r[idx["账户类型"]],
-                department=r[idx["部门"]],
-                business_owner=r[idx["商务负责人"]],
+        if provider not in providers:
+            skip_provider += 1
+            continue
+        kept += 1
+        dt = _to_dt(r[idx["数据时间"]])
+        model = normalize_model_name(r[idx["模型"]])
+        key = (cid, dt, model, provider)
+        row = agg.get(key)
+        if row is None:
+            row = agg[key] = dict(
+                customer_id=cid, customer_name=name, user_id="",
+                data_time=dt, stat_date=_to_date(r[idx["日期"]]),
+                model=model, provider=provider,
+                model_source=r[idx["模型来源"]], data_source=r[idx["数据来源"]],
+                output_token=0, cache_token=0, cache_miss_token=0,
+                total_input=0, input_output=0,
+                status=r[idx["状态"]], account_type=r[idx["账户类型"]],
+                department=r[idx["部门"]], business_owner=r[idx["商务负责人"]],
                 industry=r[idx["行业"]],
             )
-        )
+        row["output_token"] += _to_int(r[idx["outputToken"]])
+        row["cache_token"] += _to_int(r[idx["cacheToken"]])
+        row["cache_miss_token"] += _to_int(r[idx["cacheMissToken"]])
+        row["total_input"] += _to_int(r[idx["总输入"]])
+        row["input_output"] += _to_int(r[idx["输入+输出"]])
     wb.close()
-    return rows
-
-
-def upsert_customers(names: set[str]) -> dict[str, int]:
-    """按客户名 upsert，返回 {客户名: customer_id}。为新客户分配递增 customer_code。"""
-    existing = {c.customer_name: c for c in MonitorConsumer.query.all()}
-    # 计算下一个数字编码
-    max_num = 0
-    for code in (c.customer_code for c in existing.values()):
-        if code and code.startswith("C") and code[1:].isdigit():
-            max_num = max(max_num, int(code[1:]))
-    name_to_id: dict[str, int] = {}
-    created = 0
-    for name in sorted(names):
-        cust = existing.get(name)
-        if cust is None:
-            max_num += 1
-            cust = MonitorConsumer(ai_consumer=name, customer_code=f"C{max_num:04d}",
-                                   customer_name=name, level="B")
-            db.session.add(cust)
-            db.session.flush()  # 取 id
-            created += 1
-        name_to_id[name] = cust.id
-    db.session.commit()
-    print(f"[customers] 命中 {len(names)} 个平台客户；新建 {created} 个，复用 {len(names) - created} 个")
-    return name_to_id
-
-
-def ingest_usage(rows: list[dict], name_to_id: dict[str, int]) -> None:
-    # 已存在自然键（幂等）
-    existing_keys = set(
-        db.session.query(
-            CustomerUsageHourly.customer_id,
-            CustomerUsageHourly.user_id,
-            CustomerUsageHourly.key_id,
-            CustomerUsageHourly.data_time,
-            CustomerUsageHourly.stat_date,
-            CustomerUsageHourly.model,
-            CustomerUsageHourly.provider,
-            CustomerUsageHourly.phase,
-        ).all()
-    )
-    to_add, skipped = [], 0
-    for row in rows:
-        cid = name_to_id[row["customer_name"]]
-        nk = (cid, row["user_id"], row["key_id"], row["data_time"], row["stat_date"], row["model"], row["provider"], row["phase"])
-        if nk in existing_keys:
-            skipped += 1
-            continue
-        existing_keys.add(nk)
-        to_add.append(CustomerUsageHourly(customer_id=cid, **row))
-    db.session.bulk_save_objects(to_add)
-    db.session.commit()
-    print(f"[usage] 待录入 {len(rows)} 行：新增 {len(to_add)}，跳过已存在 {skipped}")
+    print(f"[filter] 明细 {total} 行：保留 {kept}，跳过(非在册客户) {skip_customer}，"
+          f"跳过(provider 不在 provider_mappings) {skip_provider}；聚合成 {len(agg)} 条小时行")
+    return list(agg.values())
 
 
 def main():
-    print(f"明细文件 : {DETAIL_XLSX}")
-    print(f"平台输入 : {PLATFORM_XLSX}")
-    keep = load_platform_customers(PLATFORM_XLSX)
-    rows = load_detail_rows(DETAIL_XLSX, keep)
-    print(f"[filter] 平台客户 {len(keep)} 个；匹配明细 {len(rows)} 行")
-
+    print(f"明细文件: {DETAIL_XLSX}")
     app = create_app("dev")
     with app.app_context():
-        db.create_all()  # 确保新表 customer_usage_hourly 建立
-        name_to_id = upsert_customers(keep)
-        ingest_usage(rows, name_to_id)
-        total = db.session.query(CustomerUsageHourly).count()
-        print(f"[done] customer_usage_hourly 现有总行数：{total}")
+        db.create_all()
+        name_to_id = {c.customer_name: c.id for c in db.session.query(MonitorConsumer).all()
+                      if c.customer_name}
+        providers = {p.provider for p in db.session.query(ProviderMapping).all() if p.provider}
+        print(f"[ref] 在册客户 {len(name_to_id)} 个；provider_mappings provider {len(providers)} 个")
+
+        rows = load_detail(DETAIL_XLSX, name_to_id, providers)
+        if not rows:
+            print("[done] 无匹配数据可录入")
+            return
+
+        # 幂等：先删这批客户的旧 hourly 行（不动 __all__ 等其它客户）
+        cids = {r["customer_id"] for r in rows}
+        deleted = CustomerUsageHourly.query.filter(
+            CustomerUsageHourly.customer_id.in_(cids)).delete(synchronize_session=False)
+        db.session.bulk_save_objects([CustomerUsageHourly(**r) for r in rows])
+        db.session.commit()
+        print(f"[usage] 删除旧行 {deleted}，写入分客户 hourly {len(rows)} 行（覆盖 {len(cids)} 个客户）")
+        print(f"[done] customer_usage_hourly 现有总行数：{db.session.query(CustomerUsageHourly).count()}")
 
 
 if __name__ == "__main__":

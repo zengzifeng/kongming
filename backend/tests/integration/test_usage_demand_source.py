@@ -1,19 +1,18 @@
 """usage_demand_source：验证从实跑量 + 售卖折扣构建 DemandSnapshotItem 的口径。"""
-from datetime import date, datetime
+from datetime import datetime
 
 from app.algorithms.usage_demand_source import build_usage_demand_items
 from app.extensions import db
-from app.models import ClusterResource, MonitorConsumer, CustomerSellDiscount, CustomerUsageHourly
+from app.models import MonitorConsumer, CustomerSellDiscount, CustomerUsageHourly, ProviderMapping
 
 
 def _usage(cust_id, model, dt, io, ti, ot, ct, cmt, source, provider):
     return CustomerUsageHourly(
-        customer_id=cust_id, customer_name="c", user_id="u", key_id="k",
-        data_time=dt, stat_date=dt.date(), phase="p0", model=model, provider=provider,
+        customer_id=cust_id, customer_name="c", user_id="u",
+        data_time=dt, stat_date=dt.date(), model=model, provider=provider,
         model_source=source, data_source="生产",
         output_token=ot, cache_token=ct, cache_miss_token=cmt,
-        total_input=ti, input_output=io, creation_cache_1h_token=0,
-        creation_cache_5m_token=0, web_search_fc_count=0, av_duration=0,
+        total_input=ti, input_output=io,
     )
 
 
@@ -81,12 +80,9 @@ def test_ratios_match_hand_calc(app):
 
 
 # ---------------- 口径修订：自建 provider 白名单 + 剔除客户 ----------------
-def _cluster(name, model, provider):
-    return ClusterResource(
-        snapshot_date=date(2026, 7, 7), cluster_name=name, deployed_model=model,
-        machine_count=8, tpm_per_machine=2_600_000, total_capacity_tpm=20_800_000,
-        raw_json={"provider": provider},
-    )
+def _provider_mapping(model, provider, cluster="GLM-5.1-FP8"):
+    return ProviderMapping(customer_name="混跑客户", model_name=model,
+                           provider=provider, cluster_name=cluster)
 
 
 def _seed_whitelist(app):
@@ -96,7 +92,7 @@ def _seed_whitelist(app):
     db.session.flush()
     t = datetime(2026, 7, 7, 11, 0, 0)
     db.session.add_all([
-        _cluster("GLM-5.1-FP8", "glm-5.1", "ksyun-glm5.1-qy-10056"),   # 本模型白名单 provider
+        _provider_mapping("glm-5.1", "ksyun-glm5.1-qy-10056"),   # 本模型白名单 provider
         # 自建标记 + 白名单内 provider：真自建 io=600
         _usage(cust.id, "glm-5.1", t, 600, 600, 100, 0, 0, "自建", "ksyun-glm5.1-qy-10056"),
         # 自建标记 + 白名单外 provider(GLM-4.7 集群)：应改判三方 io=400

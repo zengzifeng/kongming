@@ -1,18 +1,19 @@
 """波形拟合模块：算法目录只读、客户关联配置增改、跑拟合产出客户+集群波形、开关接入求解。"""
-from datetime import date, datetime
+from datetime import datetime
 
 from app.extensions import db
-from app.models import ClusterResource, MonitorConsumer, CustomerUsageHourly
+from app.models import MonitorConsumer, CustomerUsageHourly
+
+from tests.conftest import seed_cluster
 
 
 def _usage(cust_id, model, dt, io):
     return CustomerUsageHourly(
-        customer_id=cust_id, customer_name="c", user_id="u", key_id="k",
-        data_time=dt, stat_date=dt.date(), phase="p0", model=model, provider="prov",
+        customer_id=cust_id, customer_name="c", user_id="u",
+        data_time=dt, stat_date=dt.date(), model=model, provider="prov",
         model_source="自建", data_source="生产",
         output_token=0, cache_token=0, cache_miss_token=0,
-        total_input=0, input_output=io, creation_cache_1h_token=0,
-        creation_cache_5m_token=0, web_search_fc_count=0, av_duration=0,
+        total_input=0, input_output=io,
     )
 
 
@@ -25,10 +26,8 @@ def _seed_usage(app):
         _usage(cust.id, "glm-5.1", datetime(2026, 7, 7, 10, 0, 0), 1200),
         _usage(cust.id, "glm-5.1", datetime(2026, 7, 7, 3, 0, 0), 600),
     ])
-    db.session.add(ClusterResource(
-        snapshot_date=date(2026, 7, 7), cluster_name="cluster-a",
-        deployed_model="glm-5.1", machine_count=10,
-    ))
+    # 部署 glm-5.1 的集群（集群名=部署模型名），供集群级叠加波形。
+    seed_cluster("glm-5.1", "glm-5.1", machine_count=10, tpm_per_machine=1_000_000)
     db.session.flush()
     return cust
 
@@ -52,31 +51,35 @@ def test_algorithms_readonly_no_post_route(client):
 
 # ---- 客户关联配置增改查 ----
 def test_config_create_and_list(client):
-    payload = {"customer_code": "C0200", "model_name": "glm-5.1",
+    payload = {"ai_consumer": "客户A", "model_name": "glm-5.1",
                "period": "busy", "algo_name": "demo",
                "params_json": {"delta_tpm": 5.0}}
     res = client.post("/api/v1/fittings/configs", json=payload)
     assert res.status_code == 200, res.json
     cfg_id = res.json["data"]["id"]
 
-    res = client.get("/api/v1/fittings/configs?customer_code=C0200")
+    res = client.get("/api/v1/fittings/configs?ai_consumer=客户A")
     assert res.status_code == 200
     assert len(res.json["data"]) == 1
     assert res.json["data"][0]["id"] == cfg_id
 
 
-def test_config_upsert_is_idempotent_on_natural_key(client):
-    payload = {"customer_code": "C0200", "model_name": "glm-5.1",
+def test_config_upsert_is_idempotent_on_consumer_model(client):
+    payload = {"ai_consumer": "客户A", "model_name": "glm-5.1",
                "period": "busy", "algo_name": "demo"}
     r1 = client.post("/api/v1/fittings/configs", json=payload)
     r2 = client.post("/api/v1/fittings/configs",
-                     json={**payload, "params_json": {"delta_tpm": 9.0}})
-    assert r1.json["data"]["id"] == r2.json["data"]["id"]  # 同自然键，更新非新增
+                     json={**payload, "period": "idle", "params_json": {"delta_tpm": 9.0}})
+    assert r1.json["data"]["id"] == r2.json["data"]["id"]  # 同客户+模型，更新非新增
     assert r2.json["data"]["params_json"]["delta_tpm"] == 9.0
+
+    res = client.get("/api/v1/fittings/configs?ai_consumer=客户A")
+    assert res.status_code == 200
+    assert len(res.json["data"]) == 1
 
 
 def test_config_patch(client):
-    payload = {"customer_code": "C0200", "model_name": "glm-5.1",
+    payload = {"ai_consumer": "客户A", "model_name": "glm-5.1",
                "period": "idle", "algo_name": "demo"}
     cfg_id = client.post("/api/v1/fittings/configs", json=payload).json["data"]["id"]
     res = client.patch(f"/api/v1/fittings/configs/{cfg_id}", json={"enabled": False})
@@ -86,14 +89,14 @@ def test_config_patch(client):
 
 def test_config_rejects_unknown_algo(client):
     res = client.post("/api/v1/fittings/configs", json={
-        "customer_code": "C0200", "model_name": "glm-5.1",
+        "ai_consumer": "客户A", "model_name": "glm-5.1",
         "period": "busy", "algo_name": "does-not-exist"})
     assert res.status_code == 400, res.json
 
 
 def test_config_rejects_bad_period(client):
     res = client.post("/api/v1/fittings/configs", json={
-        "customer_code": "C0200", "model_name": "glm-5.1",
+        "ai_consumer": "客户A", "model_name": "glm-5.1",
         "period": "midday", "algo_name": "demo"})
     assert res.status_code == 400, res.json
 
@@ -101,11 +104,9 @@ def test_config_rejects_bad_period(client):
 # ---- 跑拟合：客户波形 + 集群叠加 ----
 def test_run_fitting_produces_customer_and_cluster_results(client, app):
     _seed_usage(app)
-    # 忙时 + 闲时各配一条 demo，均 +0 增量
-    for period in ("busy", "idle"):
-        client.post("/api/v1/fittings/configs", json={
-            "customer_code": "C0200", "model_name": "glm-5.1",
-            "period": period, "algo_name": "demo"})
+    client.post("/api/v1/fittings/configs", json={
+        "ai_consumer": "客户A", "model_name": "glm-5.1",
+        "period": "busy", "algo_name": "demo"})
 
     res = client.post("/api/v1/fittings/run")
     assert res.status_code == 200, res.json
@@ -126,7 +127,7 @@ def test_run_fitting_produces_customer_and_cluster_results(client, app):
 def test_run_fitting_delta_applied(client, app):
     _seed_usage(app)
     client.post("/api/v1/fittings/configs", json={
-        "customer_code": "C0200", "model_name": "glm-5.1",
+        "ai_consumer": "客户A", "model_name": "glm-5.1",
         "period": "busy", "algo_name": "demo", "params_json": {"delta_tpm": 6.0}})
     client.post("/api/v1/fittings/run")
     res = client.get("/api/v1/fittings/results?level=customer&period=busy")
@@ -140,12 +141,10 @@ def test_build_fitted_series_merges_periods(app):
 
     _seed_usage(app)
     svc = WaveFittingService()
-    svc.upsert_config({"customer_code": "C0200", "model_name": "glm-5.1",
+    svc.upsert_config({"ai_consumer": "客户A", "model_name": "glm-5.1",
                        "period": "busy", "algo_name": "demo"})
-    svc.upsert_config({"customer_code": "C0200", "model_name": "glm-5.1",
-                       "period": "idle", "algo_name": "demo"})
     svc.run_fitting()
-    merged = svc.build_fitted_series("C0200", "glm-5.1")
+    merged = svc.build_fitted_series("客户A", "glm-5.1")
     # 闲时(3点 tpm10) + 忙时(10点 tpm20) 合并为两点整段序列
     assert len(merged) == 2
     tpms = sorted(t for _, t in merged)

@@ -174,24 +174,21 @@ def test_time_period_cross_model_move_and_conservation():
 
 
 def test_time_period_no_same_model_rate_arbitrage():
-    # 禁同模型 rate 套利：低速率同模型源必须是"对本客户不可服务"（专属簇）才会成为候选源，
-    # 再被套利护栏挡掉（同模型 + src_rate<target_rate）。同时给一个跨模型源证明它可被正常选用。
+    # primary_customer 门控已移除：同模型低速率源(lo)可直接服务本客户；但套利护栏仍应阻止
+    # "把机器从低速率源(lo)搬到高速率同模型目标(hi)"这种同模型 rate 套利。
     clusters = [
-        # 目标 hi：共享 glm、高速率、满容量小 → 触发搬运
+        # 目标 hi：共享 glm、高速率、满容量小
         {"cluster_name": "hi", "deployed_model": "glm", "machine_count": 1, "tpm_per_machine": 80_000,
          "current_redundant_tpm": 80_000, "current_redundant_machines": 0},
-        # lo-KSCC：同模型 glm、低速率、专属 kscc-cust（对 c 不可服务）、有空闲 → 若无护栏会被套利搬来
-        {"cluster_name": "lo-KSCC", "deployed_model": "glm", "machine_count": 4, "tpm_per_machine": 50_000,
-         "current_redundant_tpm": 150_000, "current_redundant_machines": 3, "primary_customer": "kscc-cust"},
-        # kimi-idle：跨模型空闲源（应被正常选用）
-        {"cluster_name": "kimi-idle", "deployed_model": "kimi", "machine_count": 3, "tpm_per_machine": 50_000,
+        # lo：同模型 glm、低速率、有空闲 → 若无护栏会被套利搬到 hi
+        {"cluster_name": "lo", "deployed_model": "glm", "machine_count": 4, "tpm_per_machine": 50_000,
          "current_redundant_tpm": 150_000, "current_redundant_machines": 3},
     ]
     result = TimePeriodSolver().solve(_multi_snapshot(
-        [_tp_dem("c", "glm", 200_000, 0.9)], clusters, ["glm", "kimi"]))
-    froms = {m["from_cluster"] for m in result.summary["node_moves"]}
-    assert "lo-KSCC" not in froms   # 同模型低速率专属源：套利被禁
-    assert "kimi-idle" in froms     # 跨模型源：正常选用
+        [_tp_dem("c", "glm", 200_000, 0.9)], clusters, ["glm"]))
+    moves = result.summary["node_moves"]
+    # 同模型低速率→高速率的套利搬运必须被禁
+    assert not any(m["from_cluster"] == "lo" and m["to_cluster"] == "hi" for m in moves)
 
 
 def test_time_period_no_net_zero_same_model_churn():

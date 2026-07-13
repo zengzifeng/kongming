@@ -111,43 +111,79 @@ def test_dashboard_resources_contract(client):
 
 def test_update_cluster_tpm_per_machine_recalculates_and_persists(client, app):
     from app.extensions import db
-    from app.models import ClusterResource
-    from app.utils.time import utcnow
+    from app.models import ClusterCapacity
+    from tests.conftest import seed_cluster
 
     with app.app_context():
-        db.session.add(ClusterResource(
-            snapshot_date=utcnow().date(),
-            cluster_name="db-glm",
-            deployed_model="GLM-5.2",
-            machine_count=2,
-            tpm_per_machine=2_000_000,
-            total_capacity_tpm=4_000_000,
-            current_tpm=1_500_000,
-            current_redundant_tpm=2_500_000,
-            current_redundant_machines=1,
-            raw_json={"provider": "ksyun-glm"},
-        ))
+        # 监控给出台数=2、实跑=150万；单机能力由本接口录入。
+        seed_cluster("db-glm", "db-glm", machine_count=2, tpm_per_machine=2_000_000,
+                     current_tpm=1_500_000, provider="ksyun-glm")
         db.session.commit()
 
     res = client.patch("/api/v1/dashboard/resources/clusters", json={
         "cluster_name": "db-glm",
-        "deployed_model": "GLM-5.2",
         "tpm_per_machine_w": 260,
     })
     assert res.status_code == 200, res.json
     data = res.json["data"]
     assert data["tpm_per_machine_w"] == 260
-    assert data["total_capacity_w"] == 520
-    assert data["current_redundant_w"] == 370
-    assert data["current_redundant_machines"] == 1
+    assert data["total_capacity_w"] == 520        # 2 × 260
+    assert data["current_redundant_w"] == 370      # 520 − 150
+    assert data["current_redundant_machines"] == 1  # 370 // 260
 
     with app.app_context():
-        row = db.session.query(ClusterResource).filter_by(cluster_name="db-glm", deployed_model="GLM-5.2").one()
+        row = db.session.query(ClusterCapacity).filter_by(cluster_name="db-glm").one()
         assert float(row.tpm_per_machine) == 2_600_000
-        assert float(row.total_capacity_tpm) == 5_200_000
-        assert float(row.current_redundant_tpm) == 3_700_000
-        assert row.current_redundant_machines == 1
-        assert row.raw_json["单台承接能力_wTPM"] == 260
+
+
+def test_monitor_consumer_tpm_range_and_options_contract(client, app):
+    from datetime import datetime
+
+    from app.extensions import db
+    from app.models import ConsumerModelTpm, MonitorBatch, MonitorBatchStatus
+
+    with app.app_context():
+        batch = MonitorBatch(
+            batch_no="CONSUMER-TPM-RANGE",
+            triggered_by="test",
+            started_at=datetime(2026, 7, 7, 10, 0, 0),
+            status=MonitorBatchStatus.SUCCESS,
+        )
+        db.session.add(batch)
+        db.session.flush()
+        for minute, tpm in ((0, 100), (5, 180)):
+            db.session.add(ConsumerModelTpm(
+                batch_id=batch.id,
+                data_time=datetime(2026, 7, 7, 10, minute, 0),
+                ai_consumer="consumer-a",
+                customer_code="user-a",
+                ai_model="model-a",
+                tpm=tpm,
+                self_ratio=0.7,
+                thirdparty_ratio=0.3,
+            ))
+        db.session.commit()
+
+    res = client.get("/api/v1/monitor/consumer-tpm?ai_consumer=consumer-a&ai_model=model-a")
+    assert res.status_code == 200, res.json
+    assert len(res.json["data"]["items"]) == 1
+    assert float(res.json["data"]["items"][0]["tpm"]) == 180
+
+    res = client.get(
+        "/api/v1/monitor/consumer-tpm?"
+        "start_time=2026-07-07T10:00:00&end_time=2026-07-07T10:05:00&"
+        "ai_consumer=consumer-a&ai_model=model-a&customer_code=user-a"
+    )
+    assert res.status_code == 200, res.json
+    items = res.json["data"]["items"]
+    assert len(items) == 2
+    assert [float(item["tpm"]) for item in items] == [100, 180]
+
+    res = client.get("/api/v1/monitor/consumer-tpm/options")
+    assert res.status_code == 200, res.json
+    assert "model-a" in res.json["data"]["ai_models"]
+    assert "consumer-a" in res.json["data"]["ai_consumers"]
+    assert "user-a" in res.json["data"]["customer_codes"]
 
 
 def test_dashboard_management_contract(client):

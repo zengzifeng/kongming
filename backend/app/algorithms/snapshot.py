@@ -120,8 +120,6 @@ def build_snapshot(
             # 总量从（可能已被冗余计算覆盖的）集群 dict 求和，保证与 clusters 一致。
             "total_capacity_tpm": sum(c.get("total_capacity_tpm", 0) or 0 for c in cluster_dicts),
             "total_current_redundant_tpm": sum(c.get("current_redundant_tpm", 0) or 0 for c in cluster_dicts),
-            "total_idle_redundant_tpm": sum(c.get("idle_redundant_tpm", 0) or 0 for c in cluster_dicts),
-            "total_busy_redundant_tpm": sum(c.get("busy_redundant_tpm", 0) or 0 for c in cluster_dicts),
         },
         monitoring={
             "captured_at": monitoring.captured_at,
@@ -191,10 +189,19 @@ def _apply_fitted_series(demand_items) -> None:
     if not current_app.config.get("WAVE_FIT_ENABLED", False):
         return
     from ..services.wave_fitting_service import WaveFittingService
+    from ..extensions import db
+    from ..models import MonitorConsumer
 
+    # 需求项按 customer_code 标识，拟合按 ai_consumer 标识：建 code->ai_consumer 映射。
+    consumer_by_code = {
+        c.customer_code: c.ai_consumer
+        for c in db.session.execute(db.select(MonitorConsumer)).scalars()
+        if c.customer_code
+    }
     svc = WaveFittingService()
     for item in demand_items:
-        fitted = svc.build_fitted_series(item.customer_code, item.model_name)
+        ai_consumer = consumer_by_code.get(item.customer_code, item.customer_code)
+        fitted = svc.build_fitted_series(ai_consumer, item.model_name)
         if fitted:
             item.tpm_series = fitted
             item.expected_tpm = max(tpm for _, tpm in fitted)  # 峰值基准同步为拟合序列峰值

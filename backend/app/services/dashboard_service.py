@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from ..extensions import db
 from ..models import (
     Alert,
-    ClusterResource,
+    ClusterCapacity,
     MonitorConsumer,
     CustomerUsageDaily,
     Demand,
@@ -216,9 +216,9 @@ class DashboardService:
         from ..integrations import resource_client
         snapshot = resource_client().snapshot()
         clusters = snapshot.clusters
-        watched_names = self._watched_cluster_names()
+        watched_names = {n.lower() for n in self._watched_cluster_names()}
         if watched_names:
-            clusters = [c for c in clusters if c.cluster_name in watched_names]
+            clusters = [c for c in clusters if (c.cluster_name or "").lower() in watched_names]
         if cluster_name:
             clusters = [c for c in clusters if c.cluster_name == cluster_name]
         if deployed_model:
@@ -238,8 +238,6 @@ class DashboardService:
         total_current = sum(c.current_tpm for c in clusters)
         total_current_redundant = sum(
             c.current_redundant_tpm for c in clusters)
-        total_idle_redundant = sum(c.idle_redundant_tpm for c in clusters)
-        total_busy_redundant = sum(c.busy_redundant_tpm for c in clusters)
         avg_utilization = (
             total_current / total_capacity) if total_capacity else 0
 
@@ -258,7 +256,7 @@ class DashboardService:
                 "utilization": (c.current_tpm / c.total_capacity_tpm) if c.total_capacity_tpm else 0,
                 "cluster_name": c.cluster_name,
                 "deployed_model": c.deployed_model,
-                "primary_customer": c.primary_customer,
+                "provider": c.provider,
             }
             for c in clusters
         ]
@@ -270,8 +268,6 @@ class DashboardService:
             "nodes": nodes,
             "total_current_tpm": total_current,
             "total_current_redundant_tpm": total_current_redundant,
-            "total_idle_redundant_tpm": total_idle_redundant,
-            "total_busy_redundant_tpm": total_busy_redundant,
             "clusters": clusters_payload,
         }
 
@@ -286,88 +282,69 @@ class DashboardService:
     def update_cluster_tpm_per_machine(
         self,
         cluster_name: str,
-        deployed_model: str,
-        tpm_per_machine_w: float,
+        deployed_model: str | None = None,
+        tpm_per_machine_w: float = 0,
         machine_count: int | None = None,
         current_tpm_w: float | None = None,
         provider: str | None = None,
     ) -> dict:
-        if not cluster_name or not deployed_model:
-            raise ValidationFailed("集群名称和主要部署模型不能为空")
+        """前端录入自建集群单机承接能力（万 TPM）。写入 cluster_capacities（大小写不敏感）。
+
+        台数/实跑/provider 均来自监控与 provider_mappings，此处只维护 tpm_per_machine；
+        返回该集群按最新监控组装后的资源快照 payload。
+        """
+        cluster_name = (cluster_name or "").strip()
+        if not cluster_name:
+            raise ValidationFailed("集群名称不能为空")
         if tpm_per_machine_w < 0:
             raise ValidationFailed("单机承载能力不能小于 0")
-        if machine_count is not None and machine_count < 0:
-            raise ValidationFailed("机器台数不能小于 0")
 
-        latest = db.session.execute(
-            select(func.max(ClusterResource.snapshot_date))
-        ).scalar() or utcnow().date()
-
+        tpm_per_machine = Decimal(str(tpm_per_machine_w)) * Decimal("10000")
         row = db.session.execute(
-            select(ClusterResource).where(
-                ClusterResource.snapshot_date == latest,
-                ClusterResource.cluster_name == cluster_name,
-                ClusterResource.deployed_model == deployed_model,
+            select(ClusterCapacity).where(
+                func.lower(ClusterCapacity.cluster_name) == cluster_name.lower()
             )
         ).scalar_one_or_none()
         if row is None:
-            row = ClusterResource(
-                snapshot_date=latest,
-                cluster_name=cluster_name,
-                deployed_model=deployed_model,
-                machine_count=machine_count or 0,
-                raw_json={},
-            )
+            row = ClusterCapacity(cluster_name=cluster_name, tpm_per_machine=tpm_per_machine)
             db.session.add(row)
+        else:
+            row.tpm_per_machine = tpm_per_machine
+        db.session.commit()
 
-        tpm_per_machine = Decimal(str(tpm_per_machine_w)) * Decimal("10000")
-        machine_count_value = int(machine_count if machine_count is not None else row.machine_count or 0)
-        current_tpm = Decimal(str(current_tpm_w if current_tpm_w is not None else self._to_wtpm(row.current_tpm))) * Decimal("10000")
-        total_capacity = Decimal(machine_count_value) * tpm_per_machine
-        redundant_tpm = max(total_capacity - current_tpm, Decimal("0"))
-        redundant_machines = int(redundant_tpm // tpm_per_machine) if tpm_per_machine > 0 else 0
-
-        raw_json = dict(row.raw_json or {})
-        if provider:
-            raw_json["provider"] = provider
-        raw_json.update({
-            "单台承接能力_wTPM": tpm_per_machine_w,
-            "总承接能力_wTPM": float(total_capacity / Decimal("10000")),
-        })
-
-        row.machine_count = machine_count_value
-        row.tpm_per_machine = tpm_per_machine
-        row.total_capacity_tpm = total_capacity
-        row.current_tpm = current_tpm
-        row.current_redundant_tpm = redundant_tpm
-        row.current_redundant_machines = redundant_machines
-        row.raw_json = raw_json
-        db.session.flush()
-        return self._cluster_model_payload(row)
+        from ..integrations import resource_client
+        snap = resource_client().snapshot()
+        item = next(
+            (c for c in snap.clusters if c.cluster_name.lower() == cluster_name.lower()),
+            None,
+        )
+        if item is not None:
+            return self._cluster_payload(item)
+        # 监控暂无该集群实跑数据：返回仅含容量的最小 payload。
+        return {
+            "cluster_name": cluster_name,
+            "tpm_per_machine": float(tpm_per_machine),
+            "tpm_per_machine_w": self._to_wtpm(tpm_per_machine),
+            "machine_count": 0,
+            "total_capacity_tpm": 0.0,
+            "total_capacity_w": 0.0,
+            "current_tpm": 0.0,
+            "current_redundant_tpm": 0.0,
+            "current_redundant_machines": 0,
+        }
 
     def _cluster_payload(self, c) -> dict:
-        raw_json = getattr(c, "raw_json", None) or {}
         total_capacity = self._to_number(c.total_capacity_tpm)
         current_tpm = self._to_number(c.current_tpm)
         return {
             "cluster_name": c.cluster_name,
             "deployed_model": c.deployed_model,
-            "primary_customer": c.primary_customer,
-            "provider": raw_json.get("provider") or c.cluster_name,
+            "provider": c.provider or c.cluster_name,
             "machine_count": int(c.machine_count or 0),
             "tpm_per_machine": self._to_number(c.tpm_per_machine),
             "tpm_per_machine_w": self._to_wtpm(c.tpm_per_machine),
             "total_capacity_tpm": total_capacity,
             "total_capacity_w": self._to_wtpm(c.total_capacity_tpm),
-            "peak_tpm_d1_23_24": self._to_number(c.peak_tpm_d1_23_24),
-            "peak_tpm_d2_23_24": self._to_number(c.peak_tpm_d2_23_24),
-            "peak_tpm_d3_23_24": self._to_number(c.peak_tpm_d3_23_24),
-            "peak_tpm_idle": self._to_number(c.peak_tpm_idle),
-            "idle_redundant_tpm": self._to_number(c.idle_redundant_tpm),
-            "idle_redundant_machines": int(c.idle_redundant_machines or 0),
-            "peak_tpm_busy": self._to_number(c.peak_tpm_busy),
-            "busy_redundant_tpm": self._to_number(c.busy_redundant_tpm),
-            "busy_redundant_machines": int(c.busy_redundant_machines or 0),
             "current_tpm": current_tpm,
             "current_tpm_w": self._to_wtpm(c.current_tpm),
             "current_redundant_tpm": self._to_number(c.current_redundant_tpm),
@@ -379,9 +356,6 @@ class DashboardService:
     @staticmethod
     def _to_number(value) -> float:
         return float(value or 0)
-
-    def _cluster_model_payload(self, c: ClusterResource) -> dict:
-        return self._cluster_payload(c)
 
     @staticmethod
     def _to_wtpm(value) -> float:

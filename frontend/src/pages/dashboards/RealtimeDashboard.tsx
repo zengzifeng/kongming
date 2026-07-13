@@ -1,6 +1,7 @@
-import { Button, Form, Input, InputNumber, message, Select } from 'antd';
+import { Button, DatePicker, Form, InputNumber, message, Select } from 'antd';
 
 import { CheckOutlined } from '@ant-design/icons';
+import dayjs, { Dayjs } from 'dayjs';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -90,6 +91,19 @@ interface CustomerFitWave {
   yTicks: number[];
 }
 
+interface ConsumerTpmFilterOptions {
+  aiModels: string[];
+  aiConsumers: string[];
+  customerCodes: string[];
+}
+
+interface ConsumerTpmFilters {
+  range: [Dayjs, Dayjs] | null;
+  aiModel?: string;
+  aiConsumer?: string;
+  customerCode?: string;
+}
+
 interface ChartSummaryRow {
   label: string;
   color: string;
@@ -138,6 +152,12 @@ interface CapacityBarShapeProps {
 
 
 const chartColors = ['#27d7ff', '#5dffb2', '#f5d54b', '#9b8cff', '#ff8ab3', '#6aa7ff'];
+const defaultConsumerTpmRange = (): [Dayjs, Dayjs] => [dayjs().startOf('day'), dayjs().endOf('day')];
+const emptyConsumerTpmOptions = (): ConsumerTpmFilterOptions => ({ aiModels: [], aiConsumers: [], customerCodes: [] });
+
+function selectOptions(items: string[]) {
+  return items.map((item) => ({ label: item, value: item }));
+}
 
 function timeLabel(value?: string) {
   if (!value) return '-';
@@ -311,7 +331,7 @@ function buildFittingChart(results: FittingResult[]) {
   const selected = results.slice(0, 6);
   const lines = selected.map((item, index) => ({
     key: `fit${index}`,
-    name: item.cluster_name || item.customer_code || item.model_name,
+    name: item.cluster_name || item.ai_consumer || item.model_name,
     color: chartColors[index % chartColors.length],
     strokeDasharray: index === 2 ? '5 5' : undefined,
   }));
@@ -338,7 +358,7 @@ function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnap
     const selected = modelResults.slice(0, 6);
     const lines = selected.map((result, index) => ({
       key: `customer${index}`,
-      name: result.customer_code || result.cluster_name || result.model_name,
+      name: result.ai_consumer || result.cluster_name || result.model_name,
       color: chartColors[index % chartColors.length],
       strokeDasharray: index === 2 ? '5 5' : undefined,
     }));
@@ -352,10 +372,10 @@ function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnap
       });
     });
     const dispatchRatios = selected.map((result, index) => {
-      const current = ratios.find((item) => item.ai_model === result.model_name && item.customer_code === result.customer_code);
+      const current = ratios.find((item) => item.ai_model === result.model_name && item.ai_consumer === result.ai_consumer);
       const selfRatio = Number(current?.self_ratio || 0);
       const vendorRatio = Number(current?.thirdparty_ratio ?? Math.max(1 - selfRatio, 0));
-      return { key: `customer${index}`, name: result.customer_code || result.cluster_name || result.model_name, color: chartColors[index % chartColors.length], selfRatio, vendorRatio };
+      return { key: `customer${index}`, name: result.ai_consumer || result.cluster_name || result.model_name, color: chartColors[index % chartColors.length], selfRatio, vendorRatio };
     });
     return { model, data, lines, ratios: dispatchRatios, yDomain: chartDomain(data, lines), yTicks: chartTicks(data, lines) };
   });
@@ -565,6 +585,8 @@ export function RealtimeDashboard() {
   const [selfHostedRows, setSelfHostedRows] = useState<SelfHostedClusterRow[]>([]);
   const [vendorRows, setVendorRows] = useState<VendorRuntimeRow[]>([]);
   const [consumerSnapshots, setConsumerSnapshots] = useState<ConsumerTpmSnapshot[]>([]);
+  const [consumerTpmOptions, setConsumerTpmOptions] = useState<ConsumerTpmFilterOptions>(emptyConsumerTpmOptions);
+  const [consumerTpmFilters, setConsumerTpmFilters] = useState<ConsumerTpmFilters>({ range: defaultConsumerTpmRange() });
   const [idleClusterFits, setIdleClusterFits] = useState<FittingResult[]>([]);
   const [busyClusterFits, setBusyClusterFits] = useState<FittingResult[]>([]);
   const [idleCustomerFits, setIdleCustomerFits] = useState<FittingResult[]>([]);
@@ -597,9 +619,13 @@ export function RealtimeDashboard() {
       if (cancelled) return;
       setVendorRows(data.items.map(mapVendorQuota));
     }).catch(() => undefined);
-    monitorApi.consumerTpm().then((data) => {
+    monitorApi.consumerTpmOptions().then((data) => {
       if (cancelled) return;
-      setConsumerSnapshots(data.items || []);
+      setConsumerTpmOptions({
+        aiModels: data.ai_models || [],
+        aiConsumers: data.ai_consumers || [],
+        customerCodes: data.customer_codes || [],
+      });
     }).catch(() => undefined);
     watchedNamesPromise.then((names) => fittingsApi.results({ level: 'cluster', period: 'idle', page_size: 100 }).then((data) => ({ data, names }))).then(({ data, names }) => {
       if (cancelled) return;
@@ -621,6 +647,22 @@ export function RealtimeDashboard() {
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const [start, end] = consumerTpmFilters.range || [];
+    monitorApi.consumerTpm({
+      ai_consumer: consumerTpmFilters.aiConsumer,
+      ai_model: consumerTpmFilters.aiModel,
+      customer_code: consumerTpmFilters.customerCode,
+      start_time: start?.format('YYYY-MM-DDTHH:mm:ss'),
+      end_time: end?.format('YYYY-MM-DDTHH:mm:ss'),
+    }).then((data) => {
+      if (cancelled) return;
+      setConsumerSnapshots(data.items || []);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [consumerTpmFilters]);
 
   useEffect(() => {
     const nextModel = idleCustomerFitWaves[0]?.model || busyCustomerFitWaves[0]?.model || '';
@@ -814,10 +856,46 @@ export function RealtimeDashboard() {
     <section className="wire-card realtime-panel realtime-runtime-panel">
       <div className="wire-card-title">客户模型跑量图</div>
       <Form layout="inline" className="realtime-filter-grid">
-        <Form.Item label="时间范围"><Select defaultValue="today" options={[{ label: '今日', value: 'today' }, { label: '近 7 天', value: '7d' }]} /></Form.Item>
-        <Form.Item label="模型"><Input defaultValue="全部" /></Form.Item>
-        <Form.Item label="客户"><Input defaultValue="全部" /></Form.Item>
-        <Form.Item label="用户ID"><Input defaultValue="全部" /></Form.Item>
+        <Form.Item label="时间范围">
+          <DatePicker.RangePicker
+            showTime
+            value={consumerTpmFilters.range}
+            onChange={(range) => setConsumerTpmFilters((current) => ({ ...current, range: range as [Dayjs, Dayjs] | null }))}
+          />
+        </Form.Item>
+        <Form.Item label="模型">
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部"
+            value={consumerTpmFilters.aiModel}
+            options={selectOptions(consumerTpmOptions.aiModels)}
+            onChange={(value) => setConsumerTpmFilters((current) => ({ ...current, aiModel: value }))}
+            style={{ minWidth: 180 }}
+          />
+        </Form.Item>
+        <Form.Item label="客户">
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部"
+            value={consumerTpmFilters.aiConsumer}
+            options={selectOptions(consumerTpmOptions.aiConsumers)}
+            onChange={(value) => setConsumerTpmFilters((current) => ({ ...current, aiConsumer: value }))}
+            style={{ minWidth: 180 }}
+          />
+        </Form.Item>
+        <Form.Item label="用户ID">
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部"
+            value={consumerTpmFilters.customerCode}
+            options={selectOptions(consumerTpmOptions.customerCodes)}
+            onChange={(value) => setConsumerTpmFilters((current) => ({ ...current, customerCode: value }))}
+            style={{ minWidth: 180 }}
+          />
+        </Form.Item>
       </Form>
       <div className="realtime-chart-stack">
         <RuntimeLineChart

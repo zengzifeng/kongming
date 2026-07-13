@@ -29,48 +29,60 @@ class FittingAlgorithmRepository(BaseRepository[FittingAlgorithm]):
 class CustomerFittingConfigRepository(BaseRepository[CustomerFittingConfig]):
     model = CustomerFittingConfig
 
-    def list(self, customer_code: str | None = None, model_name: str | None = None,
+    def list(self, ai_consumer: str | None = None, model_name: str | None = None,
              period: str | None = None) -> list[CustomerFittingConfig]:
         stmt = select(CustomerFittingConfig)
-        if customer_code:
-            stmt = stmt.where(CustomerFittingConfig.customer_code == customer_code)
+        if ai_consumer:
+            stmt = stmt.where(CustomerFittingConfig.ai_consumer == ai_consumer)
         if model_name:
             stmt = stmt.where(CustomerFittingConfig.model_name == model_name)
         if period:
             stmt = stmt.where(CustomerFittingConfig.period == period)
         stmt = stmt.order_by(CustomerFittingConfig.id.asc())
-        return list(self.session.execute(stmt).scalars())
+        return self._unique_by_consumer_model(self.session.execute(stmt).scalars())
 
-    def get_natural(self, customer_code: str, model_name: str, period: str) -> CustomerFittingConfig | None:
+    def get_natural(self, ai_consumer: str, model_name: str) -> CustomerFittingConfig | None:
         return self.session.execute(
-            select(CustomerFittingConfig).where(
-                CustomerFittingConfig.customer_code == customer_code,
+            select(CustomerFittingConfig)
+            .where(
+                CustomerFittingConfig.ai_consumer == ai_consumer,
                 CustomerFittingConfig.model_name == model_name,
-                CustomerFittingConfig.period == period,
             )
-        ).scalar_one_or_none()
+            .order_by(CustomerFittingConfig.id.asc())
+        ).scalars().first()
 
     def list_enabled(self) -> list[CustomerFittingConfig]:
-        return list(
-            self.session.execute(
-                select(CustomerFittingConfig)
-                .where(CustomerFittingConfig.enabled.is_(True))
-                .order_by(CustomerFittingConfig.id.asc())
-            ).scalars()
-        )
+        rows = self.session.execute(
+            select(CustomerFittingConfig)
+            .where(CustomerFittingConfig.enabled.is_(True))
+            .order_by(CustomerFittingConfig.id.asc())
+        ).scalars()
+        return self._unique_by_consumer_model(rows)
+
+    @staticmethod
+    def _unique_by_consumer_model(rows) -> list[CustomerFittingConfig]:
+        seen: set[tuple[str, str]] = set()
+        unique: list[CustomerFittingConfig] = []
+        for row in rows:
+            key = (row.ai_consumer, row.model_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        return unique
 
 
 class FittingResultRepository(BaseRepository[FittingResult]):
     model = FittingResult
 
-    def list(self, level: str | None = None, customer_code: str | None = None,
+    def list(self, level: str | None = None, ai_consumer: str | None = None,
              model_name: str | None = None, period: str | None = None,
              page: int = 1, page_size: int = 50):
         filters = []
         if level:
             filters.append(FittingResult.level == level)
-        if customer_code:
-            filters.append(FittingResult.customer_code == customer_code)
+        if ai_consumer:
+            filters.append(FittingResult.ai_consumer == ai_consumer)
         if model_name:
             filters.append(FittingResult.model_name == model_name)
         if period:
@@ -82,15 +94,15 @@ class FittingResultRepository(BaseRepository[FittingResult]):
             page_size=page_size,
         )
 
-    def latest_for(self, level: str, customer_code: str | None, model_name: str,
+    def latest_for(self, level: str, ai_consumer: str | None, model_name: str,
                    period: str, cluster_name: str | None = None) -> FittingResult | None:
         stmt = select(FittingResult).where(
             FittingResult.level == level,
             FittingResult.model_name == model_name,
             FittingResult.period == period,
         )
-        if customer_code is not None:
-            stmt = stmt.where(FittingResult.customer_code == customer_code)
+        if ai_consumer is not None:
+            stmt = stmt.where(FittingResult.ai_consumer == ai_consumer)
         if cluster_name is not None:
             stmt = stmt.where(FittingResult.cluster_name == cluster_name)
         stmt = stmt.order_by(FittingResult.generated_at.desc())

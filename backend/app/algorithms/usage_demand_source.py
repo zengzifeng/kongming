@@ -13,11 +13,12 @@ from collections import defaultdict
 from typing import Iterable
 
 from ..extensions import db
-from ..models import ClusterResource, MonitorConsumer, CustomerSellDiscount, CustomerUsageHourly
+from ..models import ProviderMapping, MonitorConsumer, CustomerSellDiscount, CustomerUsageHourly
 from .base import DemandSnapshotItem
 
 SELF_SOURCE = "自建"
 VENDOR_SOURCE = "第三方"
+GLOBAL_AI_CONSUMER = "__all__"
 
 
 def _cfg(key: str, default):
@@ -31,21 +32,12 @@ def _cfg(key: str, default):
 
 
 def build_self_provider_whitelist() -> dict[str, set[str]]:
-    """自建 provider 白名单：最新 snapshot 各自建集群 raw_json.provider，按 deployed_model 聚合。
+    """自建 provider 白名单：provider_mappings 里各 provider 按 model_name 聚合。
     只有 provider ∈ 该模型白名单，才算「本模型自建集群」提供的真自建产能。"""
-    from sqlalchemy import func
-
-    latest = db.session.execute(db.select(func.max(ClusterResource.snapshot_date))).scalar()
-    if latest is None:
-        return {}
     wl: dict[str, set[str]] = defaultdict(set)
-    rows = db.session.execute(
-        db.select(ClusterResource).where(ClusterResource.snapshot_date == latest)
-    ).scalars().all()
-    for r in rows:
-        prov = (r.raw_json or {}).get("provider")
-        if prov:
-            wl[r.deployed_model].add(prov)
+    for m in db.session.execute(db.select(ProviderMapping)).scalars():
+        if m.provider:
+            wl[m.model_name].add(m.provider)
     return dict(wl)
 
 
@@ -78,8 +70,13 @@ def build_usage_demand_items(
     exclude_codes = set(exclude_customer_codes or ())
     whitelist = build_self_provider_whitelist() if apply_self_provider_whitelist else {}
 
-    code_by_id = {c.id: c.customer_code for c in db.session.execute(db.select(MonitorConsumer)).scalars()}
-    excluded_ids = {cid for cid, code in code_by_id.items() if code in exclude_codes}
+    code_by_id: dict[int, str] = {}
+    excluded_ids: set[int] = set()
+    for c in db.session.execute(db.select(MonitorConsumer)).scalars():
+        code_by_id[c.id] = c.customer_code
+        # __all__ 是全客户汇总口径，非单客户，不作为需求参与计算；同时排除整户剔除名单。
+        if c.ai_consumer == GLOBAL_AI_CONSUMER or c.customer_code in exclude_codes:
+            excluded_ids.add(c.id)
 
     discount_by_pair: dict[tuple[int, str], float] = {}
     for s in db.session.execute(db.select(CustomerSellDiscount)).scalars():

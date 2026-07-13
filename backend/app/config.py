@@ -51,11 +51,11 @@ class BaseConfig:
     MODEL_REBALANCE_ENABLED = os.environ.get("KONGMING_MODEL_REBALANCE", "1") == "1"
 
     # ---- 波形拟合(wave fitting)口径 ----
-    # 忙时小时区间（0-23 整点，闭区间集合）；闲时 = 24 小时补集。所有客户共用此全局边界。
+    # 忙时 = 9-24（包左不包右，即 9..23）；闲时 = 其 24 小时补集 = 0..8。所有客户共用此全局边界。
     WAVE_FIT_BUSY_HOURS = tuple(
         int(h) for h in os.environ.get(
             "KONGMING_WAVE_FIT_BUSY_HOURS",
-            "9,10,11,12,13,14,15,16,17,18,19,20,21",
+            "9,10,11,12,13,14,15,16,17,18,19,20,21,22,23",
         ).split(",") if h != ""
     )
     # 是否用拟合波形覆盖 time_period 求解输入的 tpm_series（关闭时退化为直接搬原始序列）

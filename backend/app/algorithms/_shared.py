@@ -58,17 +58,11 @@ class SolverEconomicsMixin:
     def _vendor_key(self, vendor: dict) -> str:
         return f"{vendor.get('vendor', 'unknown')}::{vendor.get('model', '')}"
 
-    # ---- 集群物理规则：专属集群、最小保留台数、可供出机器 ----
+    # ---- 集群物理规则：最小保留台数、可供出机器 ----
     def _matching_clusters(self, model_name: str, clusters: list[dict], customer_code: str | None = None) -> list[dict]:
-        out = []
-        for c in clusters:
-            if c.get("deployed_model") != model_name:
-                continue
-            # 专属集群（KSCC/XISHANJU 命名）只能承接其对应客户的业务，不参与同模型共享池
-            if self._is_dedicated(c) and customer_code is not None and c.get("primary_customer") != customer_code:
-                continue
-            out.append(c)
-        return out
+        # deployed_model 与 cluster_name 等同，大小写不敏感匹配。
+        ml = (model_name or "").lower()
+        return [c for c in clusters if str(c.get("deployed_model", "")).lower() == ml]
 
     @staticmethod
     def _is_dedicated(cluster: dict) -> bool:
@@ -83,7 +77,7 @@ class SolverEconomicsMixin:
 
     def _donatable_machines(self, cluster: dict) -> int:
         # 可供出机器 = 空闲机器，且不能突破该集群的常态最小保留台数
-        idle = int(cluster.get("current_redundant_machines", cluster.get("busy_redundant_machines", 0)) or 0)
+        idle = int(cluster.get("current_redundant_machines", 0) or 0)
         total = int(cluster.get("machine_count", 0) or 0)
         return max(0, min(idle, total - self._min_reserve_machines(cluster)))
 

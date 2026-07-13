@@ -161,11 +161,21 @@ function scheduledTaskFromJob(schedule: JobSchedule): ScheduledTask {
 function fittingStrategyFromConfig(config: FittingConfig): FittingStrategy {
   return {
     id: String(config.id),
-    customerName: config.customer_code,
+    customerName: config.ai_consumer,
     modelName: config.model_name,
     fittingAlgorithm: config.algo_name,
     manualParams: JSON.stringify(config.params_json || {}),
   };
+}
+
+function uniqueFittingStrategies(configs: FittingConfig[]): FittingStrategy[] {
+  const seen = new Set<string>();
+  return configs.flatMap((config) => {
+    const key = `${config.ai_consumer}::${config.model_name}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [fittingStrategyFromConfig(config)];
+  });
 }
 
 
@@ -856,7 +866,7 @@ export function StrategyDashboard() {
   }, [jobs.data]);
 
   useEffect(() => {
-    setFittingStrategies((fittingConfigs.data || []).map(fittingStrategyFromConfig));
+    setFittingStrategies(uniqueFittingStrategies(fittingConfigs.data || []));
   }, [fittingConfigs.data]);
 
   useEffect(() => {

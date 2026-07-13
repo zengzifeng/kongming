@@ -56,6 +56,38 @@ def _table_exists(conn, table: str) -> bool:
     return row is not None
 
 
+def _index_exists(conn, index: str) -> bool:
+    row = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='index' AND name=:i"),
+        {"i": index},
+    ).fetchone()
+    return row is not None
+
+
+def _dedupe_customer_fitting_configs(conn) -> None:
+    if not _table_exists(conn, "customer_fitting_configs"):
+        return
+    result = conn.execute(text("""
+        DELETE FROM customer_fitting_configs
+        WHERE id NOT IN (
+            SELECT MIN(id)
+            FROM customer_fitting_configs
+            GROUP BY ai_consumer, model_name
+        )
+    """))
+    print(f"[dedupe] customer_fitting_configs 删除重复行 {result.rowcount} 条。")
+
+    index_name = "uq_customer_fitting_consumer_model"
+    if _index_exists(conn, index_name):
+        print(f"[skip] 索引 {index_name} 已存在。")
+        return
+    conn.execute(text(
+        "CREATE UNIQUE INDEX uq_customer_fitting_consumer_model "
+        "ON customer_fitting_configs (ai_consumer, model_name)"
+    ))
+    print(f"[index] 已创建唯一索引 {index_name}。")
+
+
 def run(config_name: str = "dev") -> None:
     app = create_app(config_name)
     with app.app_context():
@@ -76,6 +108,7 @@ def run(config_name: str = "dev") -> None:
                         continue
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
                     print(f"[add ] {table}.{name}  ->  {ddl}")
+            _dedupe_customer_fitting_configs(conn)
 
         print("迁移完成。")
 

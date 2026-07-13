@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from ..extensions import db
-from ..models import ClusterResource, MonitorConsumer, CustomerUsageHourly
+from ..models import ProviderMapping, MonitorConsumer, CustomerUsageHourly
 
 SELF_SOURCE = "自建"
 
@@ -25,16 +25,12 @@ def _cfg(key: str, default):
 
 
 def _provider_by_cluster_name() -> dict[str, str]:
-    """取最新 snapshot_date 各集群的 provider（存于 raw_json.provider）。"""
-    from sqlalchemy import func
-
-    latest = db.session.execute(db.select(func.max(ClusterResource.snapshot_date))).scalar()
-    if latest is None:
-        return {}
-    rows = db.session.execute(
-        db.select(ClusterResource).where(ClusterResource.snapshot_date == latest)
-    ).scalars().all()
-    return {r.cluster_name: (r.raw_json or {}).get("provider") for r in rows}
+    """集群名 -> provider，来自 provider_mappings（同名取首个）。"""
+    out: dict[str, str] = {}
+    for m in db.session.execute(db.select(ProviderMapping)).scalars():
+        if m.cluster_name and m.provider:
+            out.setdefault(m.cluster_name, m.provider)
+    return out
 
 
 def _current_self_tpm_by_provider(exclude_customer_ids: set[int] | None = None) -> dict[str, float]:

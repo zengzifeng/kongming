@@ -25,6 +25,8 @@ def create_app(config_name: str = "dev") -> Flask:
         _apply_sqlite_compatibility_migrations()
         from .services.watched_cluster_service import ensure_default_watched_clusters
         ensure_default_watched_clusters(app)
+        from .services.wave_fitting_service import ensure_default_fitting_algorithms
+        ensure_default_fitting_algorithms(app)
         if app.config.get("SCHEDULER_ENABLED", True):
             from .jobs import start_scheduler
             start_scheduler(app)

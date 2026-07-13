@@ -21,7 +21,7 @@ class FittingInput:
     params        : 算法其余入参（关联配置 params_json 与算法 default_params 合并）。
     """
 
-    customer_code: str
+    ai_consumer: str
     model_name: str
     period: str
     period_hours: frozenset[int]

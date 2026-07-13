@@ -11,7 +11,6 @@ from flask import current_app
 from ..algorithms.fitting import FittingInput, get_fitting_algorithm
 from ..extensions import db
 from ..models import (
-    ClusterResource,
     CustomerFittingConfig,
     CustomerUsageHourly,
     FitLevel,
@@ -36,7 +35,7 @@ class WaveFittingService:
     # ---------- 时段边界 ----------
     @staticmethod
     def busy_hours() -> frozenset[int]:
-        hours = current_app.config.get("WAVE_FIT_BUSY_HOURS", tuple(range(9, 22)))
+        hours = current_app.config.get("WAVE_FIT_BUSY_HOURS", tuple(range(9, 24)))
         return frozenset(int(h) for h in hours)
 
     @classmethod
@@ -51,8 +50,8 @@ class WaveFittingService:
         return self.algo_repo.list_all()
 
     # ---------- 客户关联配置（可查/可增/可改）----------
-    def list_configs(self, customer_code=None, model_name=None, period=None) -> list:
-        return self.config_repo.list(customer_code, model_name, period)
+    def list_configs(self, ai_consumer=None, model_name=None, period=None) -> list:
+        return self.config_repo.list(ai_consumer, model_name, period)
 
     def get_config(self, config_id: int) -> CustomerFittingConfig:
         cfg = self.config_repo.get(config_id)
@@ -61,11 +60,10 @@ class WaveFittingService:
         return cfg
 
     def upsert_config(self, data: dict) -> CustomerFittingConfig:
-        """按 (customer_code, model_name, period) 自然键 upsert：存在则更新，否则新建。"""
+        """按 (ai_consumer, model_name) 自然键 upsert：存在则更新，否则新建。"""
         self._validate_period(data["period"])
         self._validate_algo(data["algo_name"])
-        existing = self.config_repo.get_natural(
-            data["customer_code"], data["model_name"], data["period"])
+        existing = self.config_repo.get_natural(data["ai_consumer"], data["model_name"])
         if existing:
             for key in ("algo_name", "params_json", "enabled"):
                 if key in data and data[key] is not None:
@@ -73,7 +71,7 @@ class WaveFittingService:
             db.session.commit()
             return existing
         cfg = CustomerFittingConfig(
-            customer_code=data["customer_code"],
+            ai_consumer=data["ai_consumer"],
             model_name=data["model_name"],
             period=data["period"],
             algo_name=data["algo_name"],
@@ -120,7 +118,7 @@ class WaveFittingService:
         generated_at = utcnow()
         configs = self.config_repo.list_enabled()
 
-        # 客户级波形：{(customer_code, model, period): series}
+        # 客户级波形：{(ai_consumer, model, period): series}
         customer_series: dict[tuple[str, str, str], list] = {}
         customer_written = 0
         for cfg in configs:
@@ -128,34 +126,35 @@ class WaveFittingService:
             if algo_entry is None or not algo_entry.enabled:
                 continue
             impl = get_fitting_algorithm(algo_entry.entry_ref)
-            hours = self.period_hours(cfg.period)
-            past = self._past_series(cfg.customer_code, cfg.model_name, hours)
             params = {**(algo_entry.default_params or {}), **(cfg.params_json or {})}
             delta = float(params.get("delta_tpm", 0.0) or 0.0)
 
-            series = impl.fit(FittingInput(
-                customer_code=cfg.customer_code,
-                model_name=cfg.model_name,
-                period=cfg.period,
-                period_hours=hours,
-                past_series=past,
-                delta_tpm=delta,
-                params=params,
-            ))
-            customer_series[(cfg.customer_code, cfg.model_name, cfg.period)] = series
-            self.result_repo.add(FittingResult(
-                level=FitLevel.CUSTOMER,
-                customer_code=cfg.customer_code,
-                cluster_name=None,
-                model_name=cfg.model_name,
-                period=cfg.period,
-                algo_name=cfg.algo_name,
-                generated_at=generated_at,
-                series_json=[[ts, tpm] for ts, tpm in series],
-                meta_json={"entry_ref": algo_entry.entry_ref, "delta_tpm": delta,
-                           "past_points": len(past)},
-            ))
-            customer_written += 1
+            for period in sorted(WavePeriod.ALL):
+                hours = self.period_hours(period)
+                past = self._past_series(cfg.ai_consumer, cfg.model_name, hours)
+                series = impl.fit(FittingInput(
+                    ai_consumer=cfg.ai_consumer,
+                    model_name=cfg.model_name,
+                    period=period,
+                    period_hours=hours,
+                    past_series=past,
+                    delta_tpm=delta,
+                    params=params,
+                ))
+                customer_series[(cfg.ai_consumer, cfg.model_name, period)] = series
+                self.result_repo.add(FittingResult(
+                    level=FitLevel.CUSTOMER,
+                    ai_consumer=cfg.ai_consumer,
+                    cluster_name=None,
+                    model_name=cfg.model_name,
+                    period=period,
+                    algo_name=cfg.algo_name,
+                    generated_at=generated_at,
+                    series_json=[[ts, tpm] for ts, tpm in series],
+                    meta_json={"entry_ref": algo_entry.entry_ref, "delta_tpm": delta,
+                               "past_points": len(past)},
+                ))
+                customer_written += 1
 
         cluster_written = self._overlay_clusters(customer_series, generated_at)
         db.session.commit()
@@ -172,7 +171,7 @@ class WaveFittingService:
         """
         # 按 (model, period) 叠加所有客户波形 -> {(model, period): {ts: sum_tpm}}
         model_overlay: dict[tuple[str, str], dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        for (customer_code, model, period), series in customer_series.items():
+        for (ai_consumer, model, period), series in customer_series.items():
             for ts, tpm in series:
                 model_overlay[(model, period)][ts] += float(tpm)
 
@@ -181,15 +180,15 @@ class WaveFittingService:
         written = 0
         for (model, period), ts_map in model_overlay.items():
             overlaid = sorted(ts_map.items())
-            targets = [c for c in clusters if c[1] == model] or [(None, model)]
+            targets = [c for c in clusters if (c[1] or "").lower() == (model or "").lower()] or [(None, model)]
             for cluster_name, _model in targets:
                 self.result_repo.add(FittingResult(
                     level=FitLevel.CLUSTER,
-                    customer_code=None,
+                    ai_consumer=None,
                     cluster_name=cluster_name,
                     model_name=model,
                     period=period,
-                    algo_name="overlay",
+                    algo_name=None,  # 集群级为聚合结果，无拟合算法
                     generated_at=generated_at,
                     series_json=[[ts, tpm] for ts, tpm in overlaid],
                     meta_json={"source": "customer_overlay"},
@@ -199,26 +198,20 @@ class WaveFittingService:
 
     @staticmethod
     def _latest_clusters() -> list[tuple[str, str]]:
-        from sqlalchemy import func
+        """最新监控批次各集群的 (cluster_name, deployed_model)（deployed_model=cluster_name）。"""
+        from ..integrations import resource_client
 
-        latest = db.session.execute(
-            db.select(func.max(ClusterResource.snapshot_date))).scalar()
-        if latest is None:
-            return []
-        rows = db.session.execute(
-            db.select(ClusterResource.cluster_name, ClusterResource.deployed_model)
-            .where(ClusterResource.snapshot_date == latest)
-        ).all()
-        return [(r[0], r[1]) for r in rows]
+        snap = resource_client().snapshot()
+        return [(c.cluster_name, c.deployed_model) for c in snap.clusters]
 
     @staticmethod
-    def _past_series(customer_code: str, model_name: str,
+    def _past_series(ai_consumer: str, model_name: str,
                      hours: frozenset[int]) -> list[tuple[str, float]]:
-        """取该客户+模型历史跑量中「落在时段小时集合内」的整点序列（TPM=Σio/60），按时间升序。"""
+        """取该客户(ai_consumer)+模型历史跑量中「落在时段小时集合内」的整点序列（TPM=Σio/60），升序。"""
         from ..models import MonitorConsumer
 
         customer = db.session.execute(
-            db.select(MonitorConsumer).where(MonitorConsumer.customer_code == customer_code)
+            db.select(MonitorConsumer).where(MonitorConsumer.ai_consumer == ai_consumer)
         ).scalar_one_or_none()
         if customer is None:
             return []
@@ -241,8 +234,8 @@ class WaveFittingService:
         return [(ts, acc[ts] / 60.0) for ts in sorted(acc)]
 
     # ---------- 供求解消费 ----------
-    def build_fitted_series(self, customer_code: str, model_name: str) -> list[tuple[str, float]]:
-        """合并该客户+模型最新的 闲时+忙时 客户级拟合波形为一条整段序列（按时间升序）。
+    def build_fitted_series(self, ai_consumer: str, model_name: str) -> list[tuple[str, float]]:
+        """合并该客户(ai_consumer)+模型最新的 闲时+忙时 客户级拟合波形为一条整段序列（升序）。
 
         无任何拟合结果时返回 []，调用方据此回退原始序列。
         """
@@ -250,7 +243,7 @@ class WaveFittingService:
         for period in (WavePeriod.IDLE, WavePeriod.BUSY):
             res = self.result_repo.latest_for(
                 level=FitLevel.CUSTOMER,
-                customer_code=customer_code,
+                ai_consumer=ai_consumer,
                 model_name=model_name,
                 period=period,
             )

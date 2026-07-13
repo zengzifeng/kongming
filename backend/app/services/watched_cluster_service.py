@@ -16,6 +16,7 @@ DEFAULT_WATCHED_CLUSTERS = [
     "GLM-5.2-Tencent",
     "jl-test",
     "Kimi-K2.5-NVFP4-MIHAYOU",
+    "Kimi-K2.6-MIHAYOU",
     "KSCC-TEST",
     "llc-test1",
     "wd-test",
