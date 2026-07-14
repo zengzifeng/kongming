@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta
+from decimal import Decimal
+
 
 from sqlalchemy import select
 
@@ -72,8 +74,19 @@ class PolicyService:
         db.session.add(run)
         db.session.flush()
 
-        self._execute(run, snapshot, demand_id=demand_id)
+        self._execute(run, snapshot, demand_id=demand_id,
+                      scenario=self._resolve_scenario(algorithm, params))
         return run
+
+    @staticmethod
+    def _resolve_scenario(algorithm: str, params: dict | None) -> str:
+        """策略场景标记：demand_evaluation / idle / busy。优先取前端传入的 module。"""
+        module = (params or {}).get("module")
+        if module in ("demand_evaluation", "idle", "busy"):
+            return module
+        if algorithm == "time_period":
+            return "busy"  # time_period 未指定时段时默认归忙时
+        return "demand_evaluation"
 
     def _load_demands(self, demand_ids: list[int]) -> list[Demand]:
         # 手动/报备路径：仅按显式 id 取 demands 表（不再默认扫全表已审批需求）。
@@ -119,7 +132,8 @@ class PolicyService:
             for row in rows
         ]
 
-    def _execute(self, run: PolicyRun, snapshot: PolicyInputSnapshot, demand_id: int | None = None):
+    def _execute(self, run: PolicyRun, snapshot: PolicyInputSnapshot, demand_id: int | None = None,
+                 scenario: str = "demand_evaluation"):
         solver = get_solver(snapshot.algorithm)
         run.status = PolicyRunStatus.RUNNING
         run.started_at = utcnow()
@@ -141,20 +155,22 @@ class PolicyService:
             db.session.flush()
             raise
 
-        self._persist_policy(run, result, demand_id=demand_id)
+        self._persist_policy(run, result, demand_id=demand_id, scenario=scenario)
         run.status = PolicyRunStatus.SUCCESS
         run.finished_at = utcnow()
         run.duration_ms = int(
             (run.finished_at - run.started_at).total_seconds() * 1000)
         db.session.flush()
 
-    def _persist_policy(self, run: PolicyRun, result: PolicyResult, demand_id: int | None = None):
+    def _persist_policy(self, run: PolicyRun, result: PolicyResult, demand_id: int | None = None,
+                        scenario: str = "demand_evaluation"):
         now = utcnow()
         policy = Policy(
             policy_run_id=run.id,
             demand_id=demand_id,
             policy_no="P" + now.strftime("%Y%m%d%H%M%S%f")[:-3],
             algorithm=run.algorithm,
+            scenario=scenario,
             summary_json=result.summary,
             expected_revenue_gain=result.expected_revenue_gain,
             expected_peak_shaving_gain=result.expected_peak_shaving_gain,
@@ -304,9 +320,16 @@ class PolicyService:
 
     @staticmethod
     def _jsonable(value):
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, dict):
+            return {k: PolicyService._jsonable(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [PolicyService._jsonable(v) for v in value]
         if hasattr(value, "isoformat"):
             return value.isoformat()
         return value
+
 
     @staticmethod
     def _demand_ids_from_snapshot(snapshot_dict: dict) -> list[int]:

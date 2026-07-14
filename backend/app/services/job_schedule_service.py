@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from apscheduler.triggers.cron import CronTrigger
 
 from ..extensions import db
@@ -13,9 +15,29 @@ class JobScheduleService:
     """
 
     def list(self) -> list[JobSchedule]:
-        return list(
-            db.session.execute(db.select(JobSchedule).order_by(JobSchedule.id.asc())).scalars()
+        rows = db.session.execute(db.select(JobSchedule).order_by(JobSchedule.id.asc())).scalars()
+        return [schedule for schedule in rows if schedule.job_name != "usage_hourly_aggregate"]
+
+    def create(self, data: dict) -> JobSchedule:
+        trigger_type = data.get("trigger_type", JobTriggerType.CRON)
+        cron_expr = data.get("cron_expr")
+        interval_seconds = data.get("interval_seconds")
+        self._validate_trigger(trigger_type, cron_expr, interval_seconds)
+
+        schedule = JobSchedule(
+            job_name=self._generate_job_name(),
+            description=data.get("description") or "人工新增任务",
+            trigger_type=trigger_type,
+            cron_expr=cron_expr,
+            interval_seconds=interval_seconds,
+            enabled=bool(data.get("enabled", True)),
+            args_json=data.get("args_json") or {},
         )
+        db.session.add(schedule)
+        db.session.flush()
+        self._apply_to_running(schedule)
+        db.session.commit()
+        return schedule
 
     def get(self, job_name: str) -> JobSchedule:
         schedule = db.session.execute(
@@ -42,6 +64,16 @@ class JobScheduleService:
         self._apply_to_running(schedule)
         db.session.commit()
         return schedule
+
+    @staticmethod
+    def _generate_job_name() -> str:
+        while True:
+            job_name = f"manual_job_{uuid4().hex[:12]}"
+            exists = db.session.execute(
+                db.select(JobSchedule.id).where(JobSchedule.job_name == job_name)
+            ).scalar_one_or_none()
+            if exists is None:
+                return job_name
 
     @staticmethod
     def _validate_trigger(trigger_type: str, cron_expr, interval_seconds) -> None:

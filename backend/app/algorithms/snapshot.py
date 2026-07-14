@@ -75,6 +75,7 @@ def build_snapshot(
     *,
     demand_items: list[DemandSnapshotItem] | None = None,
     enrich_cluster_redundancy: bool = False,
+    restrict_to_watched: bool = False,
 ) -> PolicyInputSnapshot:
     """组装求解器输入快照。
 
@@ -85,8 +86,13 @@ def build_snapshot(
 
     ``enrich_cluster_redundancy``：实跑量路径下置 True，策略运行前按最新负载实时计算
     各集群当前冗余（current_redundant_tpm/机器数），覆盖静态录入值。
+
+    ``restrict_to_watched``：置 True 时只保留 watched_clusters(enabled) 内的集群参与求解——
+    腾挪候选与自建容量/收益都限定在关注集群内，避免未关注的监控集群被当作可供出/自建产能。
+    watched 集为空时不过滤（回退全部，保护无配置的 dev/测试）。
     """
     resources = resource_client().snapshot()
+
     monitoring = monitoring_client().tpm_series()
     vendors = vendor_client().quotas()
 
@@ -106,9 +112,28 @@ def build_snapshot(
         ]
 
     cluster_dicts = [asdict(c) for c in resources.clusters]
+    if restrict_to_watched:
+        from ..extensions import db
+        from ..models import WatchedCluster
+
+        watched = {
+            (w.cluster_name or "").lower()
+            for w in db.session.execute(
+                db.select(WatchedCluster).where(WatchedCluster.enabled.is_(True))
+            ).scalars()
+        }
+        if watched:  # 有配置才过滤；空配置回退全部（保护无 watched 的 dev/测试）
+            cluster_dicts = [c for c in cluster_dicts
+                             if str(c.get("cluster_name", "")).lower() in watched]
+            # 需求同步只保留「有关注集群承载的模型」：否则这些客户的调整后自建被限为 0，
+            # 而对照基线（current_self_ratio）仍非 0，会把不属于关注范围的模型算成负收益。
+            served_models = {str(c.get("deployed_model", "")).lower() for c in cluster_dicts}
+            demand_items = [d for d in demand_items
+                            if (d.model_name or "").lower() in served_models]
     if enrich_cluster_redundancy:
         # 策略运行前：按最新实跑负载实时计算各集群当前冗余，覆盖静态录入值。
         apply_current_redundancy(cluster_dicts)
+
 
     snapshot = PolicyInputSnapshot(
         captured_at=utcnow(),
@@ -164,26 +189,32 @@ def build_run_snapshot(
         )
         if not demands:
             raise ValidationFailed("指定的需求不存在或不可用")
+        # demand_ids 路径（手动/需求评估）针对指定客户模型，不做 watched 过滤。
         return build_snapshot(algorithm=algorithm, demands=demands, params=params)
+
 
     demand_items = build_usage_demand_items()
     if not demand_items:
         raise ValidationFailed("没有可用的实跑量需求用于测算")
-    _apply_fitted_series(demand_items)
+    _apply_fitted_series(demand_items, params.get("module"))
+
     return build_snapshot(
         algorithm=algorithm,
         demand_items=demand_items,
         params=params,
         enrich_cluster_redundancy=True,
+        restrict_to_watched=True,
     )
 
 
-def _apply_fitted_series(demand_items) -> None:
+
+def _apply_fitted_series(demand_items, period: str | None = None) -> None:
     """WAVE_FIT_ENABLED 时，用波形拟合结果覆盖各需求的 tpm_series（time_period 消费）。
 
-    每个 (客户, 模型) 取最新的 闲时+忙时 客户级拟合波形合并为整段序列；无拟合结果的项
-    保留 usage_demand_source 直接搬来的原始序列（回退，行为与关闭开关时一致）。
+    指定 idle/busy 时只取对应时段波形；未指定时合并闲忙时。无拟合结果的项保留
+    usage_demand_source 直接搬来的原始序列（回退，行为与关闭开关时一致）。
     """
+
     from flask import current_app
 
     if not current_app.config.get("WAVE_FIT_ENABLED", False):
@@ -201,7 +232,8 @@ def _apply_fitted_series(demand_items) -> None:
     svc = WaveFittingService()
     for item in demand_items:
         ai_consumer = consumer_by_code.get(item.customer_code, item.customer_code)
-        fitted = svc.build_fitted_series(ai_consumer, item.model_name)
+        fitted = svc.build_fitted_series(ai_consumer, item.model_name, period=period)
+
         if fitted:
             item.tpm_series = fitted
             item.expected_tpm = max(tpm for _, tpm in fitted)  # 峰值基准同步为拟合序列峰值

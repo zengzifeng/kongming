@@ -22,7 +22,7 @@ class PolicyRepository(BaseRepository[Policy]):
     model = Policy
 
     def list(self, status=None, algorithm=None, policy_run_id=None, exclude_status=None,
-             demand_id=None, has_demand=None, page=1, page_size=20):
+             demand_id=None, has_demand=None, scenario=None, page=1, page_size=20):
         filters = []
         if status:
             filters.append(Policy.status == status)
@@ -30,6 +30,8 @@ class PolicyRepository(BaseRepository[Policy]):
             filters.append(Policy.status != exclude_status)
         if algorithm:
             filters.append(Policy.algorithm == algorithm)
+        if scenario:
+            filters.append(Policy.scenario == scenario)
         if policy_run_id:
             filters.append(Policy.policy_run_id == policy_run_id)
         if demand_id is not None:

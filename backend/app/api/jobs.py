@@ -20,10 +20,26 @@ class JobSchedulePatch(BaseModel):
     args_json: dict | None = None
 
 
+class JobScheduleCreate(BaseModel):
+    description: str = Field(min_length=1, max_length=256)
+    trigger_type: str
+    cron_expr: str | None = Field(default=None, max_length=64)
+    interval_seconds: int | None = Field(default=None, gt=0)
+    enabled: bool = True
+    args_json: dict | None = None
+
+
 @bp.get("/jobs")
 def list_jobs():
     items = JobScheduleService().list()
     return success([model_to_dict(x) for x in items])
+
+
+@bp.post("/jobs")
+def create_job():
+    payload = JobScheduleCreate(**(request.get_json(silent=True) or {}))
+    schedule = JobScheduleService().create(payload.model_dump(exclude_unset=True))
+    return success(model_to_dict(schedule))
 
 
 @bp.get("/jobs/<job_name>")

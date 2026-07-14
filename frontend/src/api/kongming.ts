@@ -120,6 +120,8 @@ export const fittingsApi = {
 
 export const jobsApi = {
   list: (): Promise<JobSchedule[]> => apiClient.get('/api/v1/jobs'),
+  create: (body: { description: string; trigger_type: string; cron_expr?: string | null; interval_seconds?: number | null; enabled?: boolean; args_json?: Record<string, unknown> }): Promise<JobSchedule> =>
+    apiClient.post('/api/v1/jobs', body),
   patch: (jobName: string, body: Partial<JobSchedule>): Promise<JobSchedule> => apiClient.patch(`/api/v1/jobs/${jobName}`, body),
 };
 

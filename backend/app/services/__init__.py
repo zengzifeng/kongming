@@ -14,6 +14,7 @@ from .resource_monitor_service import ResourceMonitorService
 from .usage_aggregation_service import UsageAggregationService
 from .wave_fitting_service import WaveFittingService
 from .watched_cluster_service import WatchedClusterService
+from .vendor_runtime_sync_service import VendorRuntimeSyncService
 
 __all__ = [
     "SyncService",
@@ -32,4 +33,5 @@ __all__ = [
     "UsageAggregationService",
     "WaveFittingService",
     "WatchedClusterService",
+    "VendorRuntimeSyncService",
 ]

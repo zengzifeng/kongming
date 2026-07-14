@@ -57,9 +57,14 @@ def test_time_period_gain_positive_and_machines_conserved():
 
 
 def test_time_period_watermark_is_time_varying():
-    # 峰值 400k 超过自建容量(4×50k=200k)，低谷 120k 在容量内 -> 低谷 self 占比应更高
-    snap = _snapshot([_demand("peaky", "c1", peak=400_000, self_ratio=0.1)])
+    # 峰值 400k 超过自建容量(4×50k=200k)，低谷 120k 在容量内 -> 低谷 self 占比应更高。
+    # 仅给 qwen 单簇（无其它可跨模型腾挪的空闲机器），确保容量确实受限、峰值溢出到三方。
+    snap = _snapshot([_demand("peaky", "c1", peak=400_000, self_ratio=0.1)], clusters=[
+        {"cluster_name": "self-qwen", "deployed_model": "qwen2.5-72b", "machine_count": 4,
+         "tpm_per_machine": 50_000, "current_redundant_tpm": 100_000, "current_redundant_machines": 2},
+    ])
     result = TimePeriodSolver().solve(snap)
+
     wm = result.summary["watermark_changes"][0]
     ratios = [slot["self_ratio"] for slot in wm["slots"]]
     peak_slot = max(wm["slots"], key=lambda x: x["tpm"])
@@ -206,17 +211,20 @@ def test_time_period_no_net_zero_same_model_churn():
 
 
 
-def test_time_period_donation_bounded_by_physical_idle():
-    # 物理供出护栏：源簇 donatable=2 台，但 current_redundant_tpm 只有 1 台份 → 只能供 1 台。
+def test_time_period_donation_bounded_by_peak_feasibility():
+    # 供出护栏（当前口径）：源模型自建须保留 min_self_required = max(0, 峰值 − 三方额度)。
+    # clS 服务 modelS，其峰值 150k、三方额度 100k → 须保留 50k(=1 台) → 4 台里最多供出 3 台。
     clusters = [
         _tp_cl("clT", "modelT", 50_000, 0, 0, machine_count=0),   # 目标：满容量 0
-        # clS：4 台，2 台标记空闲，但原生空闲 TPM 只有 50k（=1 台份）→ movable=min(2, 50k//50k)=1
-        _tp_cl("clS", "modelS", 50_000, 50_000, 2),
+        _tp_cl("clS", "modelS", 50_000, 200_000, 4),              # 4 台，满容量 200k
     ]
-    result = TimePeriodSolver().solve(_multi_snapshot(
-        [_tp_dem("c", "modelT", 200_000, 0.9)], clusters, ["modelT", "modelS"]))
+    snap = _multi_snapshot(
+        [_tp_dem("c", "modelT", 200_000, 0.9), _tp_dem("s", "modelS", 150_000, 0.9)],
+        clusters, ["modelT", "modelS"], vendor_quota=100_000)
+    result = TimePeriodSolver().solve(snap)
     moved = sum(m["machine_count"] for m in result.summary["node_moves"] if m["from_cluster"] == "clS")
-    assert moved <= 1  # 受物理原生空闲 TPM（1 台份）限制，最多搬 1 台
+    assert moved <= 3  # 源模型须为自己接不住的峰值保留 ≥1 台（50k）
+
 
 
 

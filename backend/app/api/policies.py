@@ -79,6 +79,7 @@ def list_policies():
     policy_run_id = request.args.get("policy_run_id", type=int)
     exclude_status = request.args.get("exclude_status")
     demand_id = request.args.get("demand_id", type=int)
+    scenario = request.args.get("scenario")
     # has_demand=true 仅需求评估触发的策略；false 仅人工/定时触发的全局策略。
     has_demand_arg = request.args.get("has_demand")
     has_demand = None
@@ -87,7 +88,7 @@ def list_policies():
     items, total = PolicyRepository().list(
         status=status, algorithm=algorithm, policy_run_id=policy_run_id,
         exclude_status=exclude_status, demand_id=demand_id, has_demand=has_demand,
-        page=page, page_size=page_size,
+        scenario=scenario, page=page, page_size=page_size,
     )
     return paginated([model_to_dict(p) for p in items], page, page_size, total)
 

@@ -61,8 +61,19 @@ class SolverEconomicsMixin:
     # ---- 集群物理规则：最小保留台数、可供出机器 ----
     def _matching_clusters(self, model_name: str, clusters: list[dict], customer_code: str | None = None) -> list[dict]:
         # deployed_model 与 cluster_name 等同，大小写不敏感匹配。
+        # 专属集群（dedicated=True）只服务其绑定客户 dedicated_owner_code：非该客户不可用其产能。
         ml = (model_name or "").lower()
-        return [c for c in clusters if str(c.get("deployed_model", "")).lower() == ml]
+        out = []
+        for c in clusters:
+            if str(c.get("deployed_model", "")).lower() != ml:
+                continue
+            if c.get("dedicated"):
+                owner = c.get("dedicated_owner_code")
+                if not owner or owner != customer_code:
+                    continue  # 专属集群只服务自己的客户；无绑定客户则不并入共享服务
+            out.append(c)
+        return out
+
 
     @staticmethod
     def _is_dedicated(cluster: dict) -> bool:

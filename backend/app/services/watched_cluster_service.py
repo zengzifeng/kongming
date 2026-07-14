@@ -112,15 +112,18 @@ class WatchedClusterService:
 
 def ensure_default_watched_clusters(app) -> None:
     with app.app_context():
+        # 大小写不敏感去重：避免仅因大小写差异重复插入默认集群（如 GLM-5.2-Tencent / GLM-5.2-TENCENT）。
         existing = {
-            item.cluster_name
+            item.cluster_name.lower()
             for item in db.session.execute(select(WatchedCluster)).scalars()
         }
         added = False
         for index, name in enumerate(DEFAULT_WATCHED_CLUSTERS, start=1):
-            if name in existing:
+            if name.lower() in existing:
                 continue
             db.session.add(WatchedCluster(cluster_name=name, enabled=True, sort_order=index))
+            existing.add(name.lower())
             added = True
         if added:
             db.session.commit()
+

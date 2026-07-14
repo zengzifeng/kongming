@@ -1,12 +1,12 @@
-"""把 consumer_model_tpm（API 落地的分钟级中转数据）按 客户×模型 聚合成
-customer_usage_hourly 的小时级跑量，供后续计算与展示。
+"""把 consumer_model_tpm（分钟级中转数据）按 客户×模型 聚合成 customer_usage_hourly。
 
 口径：
-- input_output（小时总 token）= Σ 该小时内各分钟点的 tpm（kingress_model_tpm 为每分钟总 token）
-- 输入/输出拆分：按该小时 avg_input_token : avg_output_token 的均值比例
-- 缓存命中/未命中拆分：按 cache_hit_rate（%）均值
-- provider / model_source：查 provider_mappings(客户,模型)，命中=自建并取其 provider，否则=三方
-- user_id 暂留空；ai_consumer=="__all__" 作为「集群粒度/全客户汇总」的特殊客户保留
+- 小时总量 total = Σ 该小时各分钟 tpm（consumer_model_tpm.tpm 为自建+三方总量）
+- 用 thirdparty_ratio（%）把总量拆成 自建量 = total×(1-tr) 与 三方量 = total×tr，
+  分别落成一条 hourly（自建行 provider 取 provider_mappings、model_source=自建；
+  三方行 provider="thirdparty"、model_source=三方）
+- 输入/输出按 avg_input:avg_output 比例、缓存按 cache_hit_rate 拆（两部分同比例）
+- user_id 暂留空；ai_consumer=="__all__" 作为全客户汇总的特殊客户保留
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from ..models import (
 
 SELF_SOURCE = "自建"
 THIRD_SOURCE = "三方"
+THIRD_PROVIDER = "thirdparty"
 GLOBAL_AI_CONSUMER = "__all__"
 
 
@@ -62,34 +63,36 @@ class UsageAggregationService:
             consumer = self._resolve_consumer(ai_consumer, consumer_cache)
             customer_name = consumer.customer_name or ai_consumer
 
-            total = sum(int(p.tpm or 0) for p in pts)  # 小时总 token
+            total = sum(int(p.tpm or 0) for p in pts)  # 小时总量（自建+三方）
+            if total <= 0:
+                continue
             ai = _mean([p.avg_input_token for p in pts])
             ao = _mean([p.avg_output_token for p in pts])
             chr_pct = _mean([p.cache_hit_rate for p in pts])
-
             input_share = ai / (ai + ao) if (ai + ao) > 0 else 0.5
-            total_input = round(total * input_share)
-            output_token = total - total_input
             chr_frac = min(max(chr_pct / 100.0, 0.0), 1.0)
-            cache_token = round(total_input * chr_frac)
-            cache_miss_token = total_input - cache_token
 
-            provider, model_source = self._provider_of(customer_name, ai_model, provider_index)
+            # 三方占比：优先 thirdparty_ratio；缺失时用 (1-ksyun_ratio) 兜底；再缺失按全自建。
+            tr_vals = [p.thirdparty_ratio for p in pts if p.thirdparty_ratio is not None]
+            if tr_vals:
+                tr_frac = _mean(tr_vals) / 100.0
+            else:
+                sr_vals = [p.self_ratio for p in pts if p.self_ratio is not None]
+                tr_frac = (1 - _mean(sr_vals) / 100.0) if sr_vals else 0.0
+            tr_frac = min(max(tr_frac, 0.0), 1.0)
 
-            self._upsert(
-                customer_id=consumer.id,
-                customer_name=customer_name,
-                data_time=hour_start,
-                model=ai_model,
-                provider=provider,
-                model_source=model_source,
-                input_output=total,
-                total_input=total_input,
-                output_token=output_token,
-                cache_token=cache_token,
-                cache_miss_token=cache_miss_token,
-            )
-            written += 1
+            self_io = round(total * (1 - tr_frac))
+            third_io = total - self_io
+            self_provider, _ = self._provider_of(customer_name, ai_model, provider_index)
+
+            if self_io > 0:
+                self._write_row(consumer.id, customer_name, hour_start, ai_model,
+                                self_provider, SELF_SOURCE, self_io, input_share, chr_frac)
+                written += 1
+            if third_io > 0:
+                self._write_row(consumer.id, customer_name, hour_start, ai_model,
+                                THIRD_PROVIDER, THIRD_SOURCE, third_io, input_share, chr_frac)
+                written += 1
 
         db.session.commit()
         return {"hour_start": hour_start.isoformat(), "rows": written}
@@ -109,7 +112,7 @@ class UsageAggregationService:
         provider = index.get((customer_name, (model or "").lower()))
         if provider:
             return provider, SELF_SOURCE
-        return "", THIRD_SOURCE
+        return "", SELF_SOURCE
 
     @staticmethod
     def _resolve_consumer(ai_consumer: str, cache: dict[str, MonitorConsumer]) -> MonitorConsumer:
@@ -132,8 +135,12 @@ class UsageAggregationService:
         return consumer
 
     @staticmethod
-    def _upsert(customer_id, customer_name, data_time, model, provider, model_source,
-                input_output, total_input, output_token, cache_token, cache_miss_token):
+    def _write_row(customer_id, customer_name, data_time, model, provider, model_source,
+                   io, input_share, chr_frac):
+        total_input = round(io * input_share)
+        output_token = io - total_input
+        cache_token = round(total_input * chr_frac)
+        cache_miss_token = total_input - cache_token
         row = db.session.execute(
             select(CustomerUsageHourly).where(
                 CustomerUsageHourly.customer_id == customer_id,
@@ -155,8 +162,9 @@ class UsageAggregationService:
         row.model_source = model_source
         row.data_source = "生产"
         row.user_id = ""
-        row.input_output = input_output
+        row.input_output = io
         row.total_input = total_input
         row.output_token = output_token
         row.cache_token = cache_token
         row.cache_miss_token = cache_miss_token
+

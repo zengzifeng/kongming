@@ -6,6 +6,7 @@ from sqlalchemy import select
 from ..extensions import db
 from ..models import VendorQuota
 from ..schemas.common import model_to_dict
+from ..utils.model_name import normalize_model_name
 from ..utils.pagination import parse_pagination
 from ..utils.response import paginated
 
@@ -23,7 +24,7 @@ def list_vendor_quotas():
     if vendor:
         filters.append(VendorQuota.vendor == vendor)
     if model:
-        filters.append(VendorQuota.model == model)
+        filters.append(db.func.lower(VendorQuota.model) == normalize_model_name(model))
     if status:
         filters.append(VendorQuota.status == status)
 
@@ -37,4 +38,9 @@ def list_vendor_quotas():
 
     items = db.session.execute(stmt).scalars().all()
     total = db.session.execute(count_stmt).scalar_one()
-    return paginated([model_to_dict(item) for item in items], page, page_size, total)
+    payload = []
+    for item in items:
+        data = model_to_dict(item)
+        data["model"] = normalize_model_name(data.get("model"))
+        payload.append(data)
+    return paginated(payload, page, page_size, total)

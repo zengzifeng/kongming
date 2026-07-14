@@ -6,9 +6,11 @@ from ..extensions import db
 from ..models import MonitorConsumer, Policy, PolicyRun
 from ..utils.errors import NotFound
 
-# 收入/收益为「TPM·整点」积分口径；× 60min ÷ 1e6(列表价元/百万token) = 元/天，
-# 同一因子把 TPM 积分体量换成「百万token/天」。故 收益(元/天)=单TPM收入(元/百万token)×体量(百万token/天)。
+# 体量换算：Σ(TPM 整点采样) × 60min ÷ 1e6 = 百万token/天。仅用于「体量」字段。
+# 收益字段（self_revenue / customer_revenue_gain / extra_revenue_gain / move.gain）在求解器里
+# 已按 TPM×分钟÷1e6×单价 积分成「元」，此处直接透传，不再乘 Y（否则会二次换算成近 0）。
 Y = 60 / 1e6
+
 
 
 class _Econ(SolverEconomicsMixin):
@@ -65,12 +67,13 @@ class PolicyReportService:
         ra = float(summary.get("self_revenue_after", 0.0))
         g = float(summary.get("expected_revenue_gain", 0.0))
         return {
-            "self_revenue_before_yuan_day": rb * Y,
-            "self_revenue_after_yuan_day": ra * Y,
-            "expected_revenue_gain_yuan_day": g * Y,
-            "expected_revenue_gain_yuan_month": g * Y * 30,
-            "expected_revenue_gain_yuan_year": g * Y * 365,
+            "self_revenue_before_yuan_day": rb,
+            "self_revenue_after_yuan_day": ra,
+            "expected_revenue_gain_yuan_day": g,
+            "expected_revenue_gain_yuan_month": g * 30,
+            "expected_revenue_gain_yuan_year": g * 365,
         }
+
 
     # ---------------- 逐调整收益（元/天）----------------
     def _attributions(self, summary, dem_by_key, model_prices, vendors, name_by_code, econ):
@@ -96,7 +99,8 @@ class PolicyReportService:
                 "sum_before_mtok_day": sum_before * Y,
                 "sum_after_mtok_day": sum_after * Y,
                 "delta_mtok_day": delta * Y,
-                "gain_yuan_day": gain * Y,
+                "gain_yuan_day": gain,
+
                 "fallback_vendor": wmc.get("fallback_vendor"),
                 "peak_tpm": max(ser) if ser else 0.0,
                 "series": [{"ts": ts, "tpm": float(t)} for ts, t in (d.get("tpm_series") or [])],
@@ -244,12 +248,13 @@ class PolicyReportService:
                                      "from_rate": mv.get("from_tpm_per_machine"),
                                      "to_rate": mv.get("to_tpm_per_machine")})
             f["n"] += int(mv.get("machine_count", 1))
-            f["gain_yuan_day"] += float(mv.get("gain", 0.0)) * Y
+            f["gain_yuan_day"] += float(mv.get("gain", 0.0))
         return {
-            "extra_gain_yuan_day": float(rb.get("extra_revenue_gain", 0.0)) * Y,
-            "self_revenue_before_yuan_day": float(rb.get("self_revenue_before", 0.0)) * Y,
-            "self_revenue_after_yuan_day": float(rb.get("self_revenue_after", 0.0)) * Y,
-            "moves": [dict(mv, gain_yuan_day=float(mv.get("gain", 0.0)) * Y) for mv in rb.get("moves", [])],
+            "extra_gain_yuan_day": float(rb.get("extra_revenue_gain", 0.0)),
+            "self_revenue_before_yuan_day": float(rb.get("self_revenue_before", 0.0)),
+            "self_revenue_after_yuan_day": float(rb.get("self_revenue_after", 0.0)),
+            "moves": [dict(mv, gain_yuan_day=float(mv.get("gain", 0.0))) for mv in rb.get("moves", [])],
+
             "flows": sorted(flows.values(), key=lambda f: -f["gain_yuan_day"]),
             "per_model": rb.get("per_model", []),
             "per_cluster": per_cluster,

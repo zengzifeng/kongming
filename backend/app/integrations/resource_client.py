@@ -15,7 +15,10 @@ class ClusterResourceItem:
     current_tpm: float             # 来自监控最新时点 tpm
     current_redundant_tpm: float
     current_redundant_machines: int = 0
+    dedicated: bool = False              # 专属集群：只服务 dedicated_owner_code 客户，不并入共享池
+    dedicated_owner_code: str | None = None  # 专属集群绑定的唯一客户 code（来自 provider_mappings）
     raw_json: dict[str, Any] = field(default_factory=dict)
+
 
 
 @dataclass
@@ -66,9 +69,16 @@ class ResourceClient:
 
     def snapshot(self) -> ResourceSnapshot:
         from ..extensions import db
-        from ..models import ClusterCapacity, ClusterModelTpm, ProviderMapping, WatchedCluster
+        from ..models import (
+            ClusterCapacity,
+            ClusterModelTpm,
+            MonitorConsumer,
+            ProviderMapping,
+            WatchedCluster,
+        )
         from ..utils.model_name import normalize_model_name
         from ..utils.time import utcnow
+
 
         now = utcnow()
         batch_id = db.session.execute(
@@ -97,11 +107,31 @@ class ResourceClient:
                 prov.setdefault(m.cluster_name.lower(), m.provider)
 
         # 重点集群显式配置的部署模型（小写规范形）；缺省回退 cluster_name 小写形。
-        watched_dm: dict[str, str] = {
-            (w.cluster_name or "").lower(): (w.deployed_model or "").strip().lower()
-            for w in db.session.execute(db.select(WatchedCluster)).scalars()
-            if w.deployed_model
+        watched_dm: dict[str, str] = {}
+        dedicated_names: set[str] = set()
+        for w in db.session.execute(db.select(WatchedCluster)).scalars():
+            key = (w.cluster_name or "").lower()
+            if w.deployed_model:
+                watched_dm[key] = (w.deployed_model or "").strip().lower()
+            if w.dedicated:
+                dedicated_names.add(key)
+
+        # 专属集群绑定的唯一客户 code：provider_mappings 里映射到该集群的客户名（唯一）→ MonitorConsumer.code。
+        code_by_name = {
+            c.customer_name: c.customer_code
+            for c in db.session.execute(db.select(MonitorConsumer)).scalars()
+            if c.customer_name
         }
+        owner_names: dict[str, set[str]] = {}
+        for m in db.session.execute(db.select(ProviderMapping)).scalars():
+            if m.cluster_name and m.customer_name:
+                owner_names.setdefault(m.cluster_name.lower(), set()).add(m.customer_name)
+
+        def owner_code_of(name_lower: str) -> str | None:
+            names = owner_names.get(name_lower)
+            if not names or len(names) != 1:
+                return None  # 非唯一客户 → 不视为可绑定的专属所有者
+            return code_by_name.get(next(iter(names)))
 
         clusters: list[ClusterResourceItem] = []
         for name, r in latest.items():
@@ -110,6 +140,7 @@ class ResourceClient:
             total_cap = machine_count * rate
             current = float(r.tpm or 0)
             redundant = max(total_cap - current, 0.0)
+            is_dedicated = name.lower() in dedicated_names
             clusters.append(ClusterResourceItem(
                 cluster_name=name,
                 deployed_model=normalize_model_name(watched_dm.get(name.lower()) or name),  # 优先 watched 配置，否则回退集群名小写形
@@ -120,6 +151,9 @@ class ResourceClient:
                 current_tpm=current,
                 current_redundant_tpm=redundant,
                 current_redundant_machines=int(redundant // rate) if rate > 0 else 0,
+                dedicated=is_dedicated,
+                dedicated_owner_code=owner_code_of(name.lower()) if is_dedicated else None,
                 raw_json={},
             ))
         return ResourceSnapshot(captured_at=now.isoformat(), clusters=clusters)
+

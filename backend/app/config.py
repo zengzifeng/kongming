@@ -17,6 +17,8 @@ class BaseConfig:
     JSON_SORT_KEYS = False
 
     SCHEDULER_ENABLED = True
+    USAGE_HOURLY_AGGREGATE_ENABLED = os.environ.get("KONGMING_USAGE_HOURLY_AGGREGATE_ENABLED", "1") == "1"
+    USAGE_HOURLY_AGGREGATE_CRON = os.environ.get("KONGMING_USAGE_HOURLY_AGGREGATE_CRON", "10 * * * *")
 
     FILING_PLATFORM_MODE = os.environ.get("FILING_PLATFORM_MODE", "mock")
     FILING_PLATFORM_BASE_URL = os.environ.get("FILING_PLATFORM_BASE_URL", "")
@@ -70,6 +72,7 @@ class TestConfig(BaseConfig):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     SCHEDULER_ENABLED = False
+    USAGE_HOURLY_AGGREGATE_ENABLED = False
     # 测试基线：默认关闭新口径/再平衡，既有用例不受扰动；需要时用例内显式开启。
     SELF_PROVIDER_WHITELIST_ENABLED = False
     EXCLUDE_CUSTOMER_CODES = ()

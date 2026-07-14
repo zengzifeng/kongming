@@ -1,4 +1,4 @@
-import { Button, Drawer, Form, Input, message, Modal, Select, Space, Spin, Table } from 'antd';
+import { Button, Drawer, Form, Input, InputNumber, message, Modal, Select, Space, Spin, Table } from 'antd';
 import { CheckCircleOutlined, DeleteOutlined, EditOutlined, EyeOutlined, PlusOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -13,9 +13,7 @@ import { evaluationsApi, fittingsApi, jobsApi, policiesApi } from '../../api/kon
 import type { Evaluation, FittingConfig, JobSchedule, Policy, PolicyDetail } from '../../api/types';
 
 import { useAsync } from '../../hooks/useAsync';
-import { money, numberText, percent } from '../../utils/format';
-
-import { parseJsonObject } from '../../utils/json';
+import { dateText, money, numberText, percent } from '../../utils/format';
 
 type StrategyTemplateKey = 'demand_evaluation' | 'idle' | 'busy';
 
@@ -88,6 +86,7 @@ interface StrategyPlan {
   subtitle: string;
   policyNo: string;
   window: string;
+  generatedAt: string | null;
   expectedGain: number;
   status: string;
   flows: StrategyFlow[];
@@ -103,6 +102,21 @@ interface ScheduledTask {
   frequency: string;
   executeTime: string;
   status: string;
+  triggerType: string;
+  cronExpr: string | null;
+  intervalSeconds: number | null;
+}
+
+interface StrategyEditFormValues {
+  flows?: Array<{ machines?: number }>;
+  attributions?: Array<{ watermark?: number }>;
+}
+
+interface ScheduledTaskFormValues {
+  taskName: string;
+  frequencyKey: string;
+  executeTimeKey: string;
+  status: string;
 }
 
 const scheduledTaskStatusLabels: Record<string, string> = {
@@ -110,6 +124,28 @@ const scheduledTaskStatusLabels: Record<string, string> = {
   scheduled: '待执行',
   paused: '已暂停',
   failed: '异常',
+};
+
+const taskFrequencyOptions = [
+  { label: '每 1 分钟', value: 'interval_60', triggerType: 'interval', intervalSeconds: 60 },
+  { label: '每 5 分钟', value: 'interval_300', triggerType: 'interval', intervalSeconds: 300 },
+  { label: '每 15 分钟', value: 'interval_900', triggerType: 'interval', intervalSeconds: 900 },
+  { label: '每 30 分钟', value: 'interval_1800', triggerType: 'interval', intervalSeconds: 1800 },
+  { label: '每小时', value: 'hourly', triggerType: 'cron' },
+  { label: '每天', value: 'daily', triggerType: 'cron' },
+  { label: '每周一', value: 'weekly_monday', triggerType: 'cron' },
+  { label: '每月 1 日', value: 'monthly_first', triggerType: 'cron' },
+];
+
+const taskExecuteTimeOptions: Record<string, Array<{ label: string; value: string }>> = {
+  interval_60: [{ label: '按间隔执行', value: 'interval' }],
+  interval_300: [{ label: '按间隔执行', value: 'interval' }],
+  interval_900: [{ label: '按间隔执行', value: 'interval' }],
+  interval_1800: [{ label: '按间隔执行', value: 'interval' }],
+  hourly: [0, 5, 10, 15, 30, 45].map((minute) => ({ label: `每小时第 ${String(minute).padStart(2, '0')} 分`, value: String(minute) })),
+  daily: ['00:00', '01:00', '02:00', '08:00', '12:00', '18:00', '23:00'].map((time) => ({ label: time, value: time })),
+  weekly_monday: ['08:00', '09:00', '10:00'].map((time) => ({ label: `周一 ${time}`, value: time })),
+  monthly_first: ['08:00', '09:00', '10:00'].map((time) => ({ label: `1 日 ${time}`, value: time })),
 };
 
 
@@ -137,14 +173,79 @@ function taskStatus(schedule: JobSchedule) {
   return schedule.last_run_at ? 'running' : 'scheduled';
 }
 
-function taskFrequency(schedule: JobSchedule) {
-  if (schedule.trigger_type === 'interval' && schedule.interval_seconds) return `每 ${Math.round(schedule.interval_seconds / 60)} 分钟`;
-  if (schedule.trigger_type === 'cron' && schedule.cron_expr) return 'Cron';
+function formatInterval(seconds: number) {
+  if (seconds < 60) return `每 ${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  if (minutes < 60) return restSeconds ? `每 ${minutes} 分 ${restSeconds} 秒` : `每 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes ? `每 ${hours} 小时 ${restMinutes} 分钟` : `每 ${hours} 小时`;
+}
+
+function parseCron(expr?: string | null) {
+  const [minute, hour, day, month, week] = (expr || '').trim().split(/\s+/);
+  return { minute, hour, day, month, week, valid: Boolean(minute && hour && day && month && week) };
+}
+
+function cronTimeLabel(expr?: string | null) {
+  const cron = parseCron(expr);
+  if (!cron.valid) return expr || '-';
+  const minute = cron.minute.padStart(2, '0');
+  if (cron.hour === '*') return `每小时第 ${minute} 分`;
+  return `${cron.hour.padStart(2, '0')}:${minute}`;
+}
+
+function cronFrequencyLabel(expr?: string | null) {
+  const cron = parseCron(expr);
+  if (!cron.valid) return 'Cron';
+  if (cron.day === '*' && cron.month === '*' && cron.week === '*' && cron.hour === '*') return '每小时';
+  if (cron.day === '*' && cron.month === '*' && cron.week === '*') return '每天';
+  if (cron.day === '*' && cron.month === '*' && cron.week !== '*') return `每周${cron.week}`;
+  if (cron.day !== '*' && cron.month === '*' && cron.week === '*') return `每月 ${cron.day} 日`;
+  return '定时执行';
+}
+
+function taskFrequency(schedule: Pick<JobSchedule, 'trigger_type' | 'interval_seconds' | 'cron_expr'>) {
+  if (schedule.trigger_type === 'interval' && schedule.interval_seconds) return formatInterval(schedule.interval_seconds);
+  if (schedule.trigger_type === 'cron' && schedule.cron_expr) return cronFrequencyLabel(schedule.cron_expr);
   return schedule.trigger_type;
 }
 
-function taskExecuteTime(schedule: JobSchedule) {
-  return schedule.next_run_at || schedule.cron_expr || (schedule.interval_seconds ? `${schedule.interval_seconds}s` : '-');
+function taskExecuteTime(schedule: Pick<JobSchedule, 'trigger_type' | 'interval_seconds' | 'cron_expr' | 'next_run_at'>) {
+  if (schedule.trigger_type === 'cron' && schedule.cron_expr) return cronTimeLabel(schedule.cron_expr);
+  if (schedule.trigger_type === 'interval' && schedule.next_run_at) return `下次 ${dateText(schedule.next_run_at)}`;
+  if (schedule.trigger_type === 'interval' && schedule.interval_seconds) return '按间隔执行';
+  return '-';
+}
+
+function scheduleKeysFromTask(task: Pick<ScheduledTask, 'triggerType' | 'cronExpr' | 'intervalSeconds'>) {
+  if (task.triggerType === 'interval') return { frequencyKey: `interval_${task.intervalSeconds || 60}`, executeTimeKey: 'interval' };
+  const cron = parseCron(task.cronExpr);
+  if (!cron.valid) return { frequencyKey: 'hourly', executeTimeKey: '0' };
+  if (cron.day === '*' && cron.month === '*' && cron.week === '*' && cron.hour === '*') return { frequencyKey: 'hourly', executeTimeKey: String(Number(cron.minute)) };
+  const time = `${cron.hour.padStart(2, '0')}:${cron.minute.padStart(2, '0')}`;
+  if (cron.day === '*' && cron.month === '*' && cron.week === '*') return { frequencyKey: 'daily', executeTimeKey: time };
+  if (cron.day === '*' && cron.month === '*' && cron.week === '1') return { frequencyKey: 'weekly_monday', executeTimeKey: time };
+  if (cron.day === '1' && cron.month === '*' && cron.week === '*') return { frequencyKey: 'monthly_first', executeTimeKey: time };
+  return { frequencyKey: 'daily', executeTimeKey: time };
+}
+
+function schedulePayload(values: ScheduledTaskFormValues) {
+  const option = taskFrequencyOptions.find((item) => item.value === values.frequencyKey) || taskFrequencyOptions[0];
+  if (option.triggerType === 'interval') {
+    return { trigger_type: 'interval', cron_expr: null, interval_seconds: option.intervalSeconds || 60 };
+  }
+  const [hour, minute] = values.executeTimeKey.split(':');
+  if (values.frequencyKey === 'hourly') return { trigger_type: 'cron', cron_expr: `${values.executeTimeKey} * * * *`, interval_seconds: null };
+  if (values.frequencyKey === 'weekly_monday') return { trigger_type: 'cron', cron_expr: `${minute} ${hour} * * 1`, interval_seconds: null };
+  if (values.frequencyKey === 'monthly_first') return { trigger_type: 'cron', cron_expr: `${minute} ${hour} 1 * *`, interval_seconds: null };
+  return { trigger_type: 'cron', cron_expr: `${minute} ${hour} * * *`, interval_seconds: null };
+}
+
+function taskFormInitialValues(task?: ScheduledTask): ScheduledTaskFormValues {
+  const keys = task ? scheduleKeysFromTask(task) : { frequencyKey: 'daily', executeTimeKey: '08:00' };
+  return { taskName: task?.taskName || '', status: task?.status || 'scheduled', ...keys };
 }
 
 function scheduledTaskFromJob(schedule: JobSchedule): ScheduledTask {
@@ -155,6 +256,9 @@ function scheduledTaskFromJob(schedule: JobSchedule): ScheduledTask {
     frequency: taskFrequency(schedule),
     executeTime: taskExecuteTime(schedule),
     status: taskStatus(schedule),
+    triggerType: schedule.trigger_type,
+    cronExpr: schedule.cron_expr,
+    intervalSeconds: schedule.interval_seconds,
   };
 }
 
@@ -178,8 +282,54 @@ function uniqueFittingStrategies(configs: FittingConfig[]): FittingStrategy[] {
   });
 }
 
+function strategyEditInitialValues(plan: StrategyPlan): StrategyEditFormValues {
+  return {
+    flows: plan.flows.map((flow) => ({ machines: flow.machines })),
+    attributions: plan.attributions.map((item) => ({ watermark: item.watermark / 10000 })),
+  };
+}
+
+function applyStrategyEdits(policy: Policy, values: StrategyEditFormValues) {
+  const summary = { ...(policy.summary_json || {}) };
+  const flowMachines = values.flows || [];
+  const watermarkRows = values.attributions || [];
+  const patchMoves = (rows: unknown) => Array.isArray(rows)
+    ? rows.map((row, index) => typeof row === 'object' && row !== null
+      ? { ...(row as Record<string, unknown>), machine_count: Number(flowMachines[index]?.machines ?? numberField(row as Record<string, unknown>, 'machine_count', 1)) }
+      : row)
+    : rows;
+  const patchWatermarks = (rows: unknown) => Array.isArray(rows)
+    ? rows.map((row, index) => {
+      if (typeof row !== 'object' || row === null) return row;
+      const record = row as Record<string, unknown>;
+      const nextWatermark = Number(watermarkRows[index]?.watermark ?? numberField(record, 'watermark_after', numberField(record, 'watermark', numberField(record, 'watermark_self_tpm'))) / 10000) * 10000;
+      return {
+        ...record,
+        watermark_after: nextWatermark,
+        watermark: nextWatermark,
+        watermark_self_tpm: nextWatermark,
+        delta: nextWatermark - numberField(record, 'watermark_before', numberField(record, 'before_watermark', nextWatermark)),
+      };
+    })
+    : rows;
+
+  summary.node_moves = patchMoves(summary.node_moves);
+  summary.watermark_changes = patchWatermarks(summary.watermark_changes);
+  summary.accepted_customers = patchWatermarks(summary.accepted_customers);
+  const rb = objectField(summary, 'model_rebalance');
+  if (rb) {
+    summary.model_rebalance = {
+      ...rb,
+      moves: patchMoves(rb.moves),
+      customer_watermark_delta: patchWatermarks(rb.customer_watermark_delta),
+    };
+  }
+  return summary;
+}
 
 function isIdlePolicy(policy: Policy) {
+
+  if (policy.scenario) return policy.scenario === 'idle';
   const text = policyText(policy);
   const template = summaryField(policy, 'template');
   const module = summaryField(policy, 'module');
@@ -187,6 +337,7 @@ function isIdlePolicy(policy: Policy) {
 }
 
 function isBusyPolicy(policy: Policy) {
+  if (policy.scenario) return policy.scenario === 'busy';
   const text = policyText(policy);
   const template = summaryField(policy, 'template');
   const module = summaryField(policy, 'module');
@@ -194,6 +345,7 @@ function isBusyPolicy(policy: Policy) {
 }
 
 function isDemandEvaluationPolicy(policy: Policy) {
+  if (policy.scenario) return policy.scenario === 'demand_evaluation';
   const template = summaryField(policy, 'template');
   const module = summaryField(policy, 'module');
   return policy.algorithm === 'demand_evaluation' || module === 'demand_evaluation' || template === '需求评估策略';
@@ -240,26 +392,33 @@ function flowFromMove(move: Record<string, unknown>, policy: Policy, index: numb
     sourceRate: `${formatTpm(numberField(move, 'from_tpm_per_machine'))}/台`,
     sourceMachinesBefore,
     sourceMachinesAfter,
-    sourceUtilizationBefore: 0,
-    sourceUtilizationAfter: 0,
+    sourceUtilizationBefore: numberField(move, 'source_utilization_before'),
+    sourceUtilizationAfter: numberField(move, 'source_utilization_after'),
     target,
     targetModel: stringField(move, 'model', stringField(move, 'to_model', '-')),
     targetRate: `${formatTpm(numberField(move, 'to_tpm_per_machine'))}/台`,
     targetMachinesBefore,
     targetMachinesAfter,
-    targetUtilizationBefore: 0,
-    targetUtilizationAfter: 0,
+    targetUtilizationBefore: numberField(move, 'target_utilization_before'),
+    targetUtilizationAfter: numberField(move, 'target_utilization_after'),
+
     machines: numberField(move, 'machine_count', 1),
     gain: numberField(move, 'gain_yuan_day', numberField(move, 'gain', Number(policy.expected_revenue_gain || 0) / Math.max(index + 1, 1))),
   };
 }
 
 function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, index: number): StrategyAttribution {
-  const before = numberField(row, 'watermark_before', numberField(row, 'before_watermark'));
-  const after = numberField(row, 'watermark_after', numberField(row, 'watermark', before));
+  // 后端 watermark_changes 行用 watermark_self_tpm / current_self_ratio / customer_revenue_gain；
+  // model_rebalance.customer_watermark_delta 行用 watermark_before / watermark_after / delta。
+  // 两种形状都要能解析，否则量会整体塌成 0。
+  const after = numberField(row, 'watermark_after', numberField(row, 'watermark', numberField(row, 'watermark_self_tpm')));
+  const selfRatio = numberField(row, 'current_self_ratio', NaN);
+  const beforeDefault = Number.isFinite(selfRatio) ? after * selfRatio : after;
+  const before = numberField(row, 'watermark_before', numberField(row, 'before_watermark', beforeDefault));
   const delta = numberField(row, 'delta', after - before);
-  const gain = numberField(row, 'gain_yuan_day', Number(policy.expected_revenue_gain || 0) / Math.max(index + 1, 1));
+  const gain = numberField(row, 'gain_yuan_day', numberField(row, 'customer_revenue_gain', Number(policy.expected_revenue_gain || 0) / Math.max(index + 1, 1)));
   const base = Math.max(before, after, 1);
+
   return {
     customer: stringField(row, 'customer', stringField(row, 'customer_code', stringField(row, 'report_id', '-'))),
     model: stringField(row, 'model', stringField(row, 'model_name', '-')),
@@ -275,6 +434,16 @@ function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, 
     fallback: stringField(row, 'fallback', stringField(row, 'reason', '-')),
     series: Array.from({ length: 24 }, () => Math.max(before, after)),
   };
+}
+
+function uniqueRecords(rows: Record<string, unknown>[], keys: string[]) {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const key = keys.map((item) => String(row[item] ?? '')).join('::');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function utilRowsFromPolicy(policy: Policy): StrategyUtilRow[] {
@@ -293,8 +462,10 @@ function utilRowsFromPolicy(policy: Policy): StrategyUtilRow[] {
 function timePeriodPlanFromPolicy(policy: Policy, kind: Extract<StrategyPlanKind, 'idle' | 'busy'>): StrategyPlan {
   const summary = policy.summary_json || {};
   const rb = objectField(summary, 'model_rebalance');
-  const moves = [...arrayField(summary, 'node_moves'), ...arrayField(rb, 'moves')];
-  const watermarkChanges = [...arrayField(summary, 'watermark_changes'), ...arrayField(rb, 'customer_watermark_delta'), ...arrayField(summary, 'accepted_customers')];
+  // node_moves 已是「机器重分配 + 模型级再平衡」按集群粒度聚合后的完整列表，直接用它即可，
+  // 不再并入 rb.moves（那是再平衡子集，合并会导致同一源→目集群重复展示）。
+  const moves = arrayField(summary, 'node_moves');
+  const watermarkChanges = uniqueRecords([...arrayField(summary, 'watermark_changes'), ...arrayField(rb, 'customer_watermark_delta'), ...arrayField(summary, 'accepted_customers')], ['customer', 'customer_code', 'model', 'model_name', 'watermark_before', 'watermark_after', 'before_watermark', 'watermark', 'gain_yuan_day', 'gain']);
   const expectedGain = kind === 'idle' ? Number(policy.expected_off_peak_gain || policy.expected_revenue_gain || 0) : Number(policy.expected_revenue_gain || 0);
   return {
     id: `${kind}-${policy.id}`,
@@ -303,6 +474,7 @@ function timePeriodPlanFromPolicy(policy: Policy, kind: Extract<StrategyPlanKind
     subtitle: stringField(summary, 'description', stringField(summary, 'reason', '')),
     policyNo: policy.policy_no,
     window: stringField(summary, 'window', kind === 'idle' ? '闲时窗口' : '忙时窗口'),
+    generatedAt: policy.created_at || null,
     expectedGain,
     status: policy.status,
     flows: moves.map((move, index) => flowFromMove(move, policy, index)),
@@ -341,6 +513,7 @@ function demandEvaluationPlanFromPolicy(policy: Policy, evaluation?: Evaluation)
     subtitle: '',
     policyNo: policy.policy_no,
     window: stringField(summary, 'window', '按需求期望时间执行'),
+    generatedAt: policy.created_at || null,
     expectedGain,
     status,
     flows: [
@@ -554,33 +727,63 @@ function FittingStrategyModule({ strategies, onChange }: FittingStrategyModulePr
 interface ScheduledTaskModuleProps {
   tasks: ScheduledTask[];
   onChange: (tasks: ScheduledTask[]) => void;
-  onSaveTask?: (task: ScheduledTask) => void;
+  onCreateTask?: (values: ScheduledTaskFormValues) => Promise<ScheduledTask | null>;
+  onSaveTask?: (task: ScheduledTask, values: ScheduledTaskFormValues) => void;
 }
 
-function ScheduledTaskModule({ tasks, onChange, onSaveTask }: ScheduledTaskModuleProps) {
+function ScheduledTaskModule({ tasks, onChange, onCreateTask, onSaveTask }: ScheduledTaskModuleProps) {
 
   const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
-  const runningCount = tasks.filter((task) => task.status === 'running').length;
-  const nextTask = tasks.find((task) => task.status === 'scheduled') || tasks[0];
+  const [creatingTask, setCreatingTask] = useState(false);
+  const activeCount = tasks.filter((task) => ['running', 'scheduled'].includes(task.status)).length;
 
-  function saveTask(values: Omit<ScheduledTask, 'id'>) {
+  function saveTask(values: ScheduledTaskFormValues) {
     if (!editingTask) return;
-    const nextTask = { ...editingTask, ...values };
+    const payload = schedulePayload(values);
+    const nextTask = {
+      ...editingTask,
+      taskName: values.taskName,
+      status: values.status,
+      triggerType: payload.trigger_type,
+      cronExpr: payload.cron_expr,
+      intervalSeconds: payload.interval_seconds,
+      frequency: taskFrequency({ trigger_type: payload.trigger_type, cron_expr: payload.cron_expr, interval_seconds: payload.interval_seconds }),
+      executeTime: taskExecuteTime({ trigger_type: payload.trigger_type, cron_expr: payload.cron_expr, interval_seconds: payload.interval_seconds, next_run_at: null }),
+    };
     onChange(tasks.map((task) => task.id === editingTask.id ? nextTask : task));
-    onSaveTask?.(nextTask);
+    onSaveTask?.(nextTask, values);
     setEditingTask(null);
   }
 
-
-  function addTask() {
-    onChange([
-      ...tasks,
-      { id: `task-manual-${Date.now()}`, taskName: '人工新增任务', algorithm: 'time_period', frequency: '每日', executeTime: '00:00', status: 'scheduled' },
-    ]);
+  async function createTask(values: ScheduledTaskFormValues) {
+    const nextTask = await onCreateTask?.(values);
+    if (!nextTask) return;
+    onChange([...tasks, nextTask]);
+    setCreatingTask(false);
   }
 
   function deleteTask(id: string) {
     onChange(tasks.filter((task) => task.id !== id));
+  }
+
+  function renderExecuteTimeSelect() {
+    return (
+      <Form.Item noStyle shouldUpdate={(prev, current) => prev.frequencyKey !== current.frequencyKey}>
+        {({ getFieldValue, setFieldsValue }) => {
+          const frequencyKey = getFieldValue('frequencyKey') || 'daily';
+          const options = taskExecuteTimeOptions[frequencyKey] || taskExecuteTimeOptions.daily;
+          const currentValue = getFieldValue('executeTimeKey');
+          if (!options.some((item) => item.value === currentValue)) {
+            setTimeout(() => setFieldsValue({ executeTimeKey: options[0]?.value }), 0);
+          }
+          return (
+            <Form.Item name="executeTimeKey" label="执行时间" rules={[{ required: true, message: '请选择执行时间' }]}>
+              <Select options={options} />
+            </Form.Item>
+          );
+        }}
+      </Form.Item>
+    );
   }
 
   return (
@@ -590,39 +793,53 @@ function ScheduledTaskModule({ tasks, onChange, onSaveTask }: ScheduledTaskModul
           <div className="strategy-module-eyebrow">Schedule</div>
           <div className="wire-card-title">定时任务管理</div>
         </div>
-        <Button size="small" type="primary" icon={<PlusOutlined />} onClick={addTask}>新增</Button>
+        <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setCreatingTask(true)}>新增</Button>
       </div>
 
-      <div className="strategy-summary-grid">
+      <div className="strategy-summary-grid strategy-summary-grid-2">
         <div><span>任务总数</span><strong>{numberText(tasks.length)}</strong></div>
-        <div><span>运行中</span><strong>{numberText(runningCount)}</strong></div>
-        <div><span>下一次执行</span><strong>{nextTask?.executeTime || '-'}</strong></div>
+        <div><span>运行/待执行</span><strong>{numberText(activeCount)}</strong></div>
       </div>
 
-      <Table<ScheduledTask>
-        className="strategy-table strategy-schedule-table"
-        size="small"
-        rowKey="id"
-        dataSource={tasks}
-        pagination={false}
-        scroll={{ x: 'max-content' }}
-        columns={[
-          { title: '任务名称', dataIndex: 'taskName', render: (value) => <span className="strategy-table-text">{value}</span> },
-          { title: '算法', dataIndex: 'algorithm', render: (value) => <span className="strategy-code-cell">{value}</span> },
-          { title: '执行频率', dataIndex: 'frequency', render: (value) => <span className="strategy-table-text">{value}</span> },
-          { title: '执行时间', dataIndex: 'executeTime', render: (value) => <span className="strategy-code-cell">{value}</span> },
-          { title: '当前状态', dataIndex: 'status', render: (value) => <StatusTag value={value} label={scheduledTaskStatusLabels[value] || value} /> },
-          { title: '操作', render: (_, record) => <Space><Button size="small" icon={<EditOutlined />} onClick={() => setEditingTask(record)}>修改</Button><Button size="small" danger icon={<DeleteOutlined />} onClick={() => deleteTask(record.id)}>删除</Button></Space> },
-        ]}
-      />
+      <div className="schedule-task-list">
+        {tasks.map((task) => (
+          <article className="schedule-task-card" key={task.id}>
+            <div className="schedule-task-head">
+              <strong>{task.taskName}</strong>
+              <StatusTag value={task.status} label={scheduledTaskStatusLabels[task.status] || task.status} />
+            </div>
+            <div className="schedule-task-meta">
+              <div><span>任务 ID</span><code>{task.algorithm}</code></div>
+              <div><span>执行频率</span><b>{task.frequency}</b></div>
+              <div><span>执行时间</span><b>{task.executeTime}</b></div>
+            </div>
+            <div className="schedule-task-actions">
+              <Button size="small" icon={<EditOutlined />} onClick={() => setEditingTask(task)}>修改</Button>
+              <Button size="small" danger icon={<DeleteOutlined />} onClick={() => deleteTask(task.id)}>删除</Button>
+            </div>
+          </article>
+        ))}
+        {!tasks.length ? <EmptyState description="暂无定时任务" /> : null}
+      </div>
+
+      <Modal title="新增定时任务" open={creatingTask} footer={null} destroyOnClose onCancel={() => setCreatingTask(false)}>
+        <Form layout="vertical" initialValues={taskFormInitialValues()} onFinish={createTask}>
+          <Form.Item name="taskName" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }]}><Input /></Form.Item>
+          <Form.Item name="frequencyKey" label="执行频率" rules={[{ required: true, message: '请选择执行频率' }]}><Select options={taskFrequencyOptions.map(({ label, value }) => ({ label, value }))} /></Form.Item>
+          {renderExecuteTimeSelect()}
+          <Form.Item name="status" label="当前状态" rules={[{ required: true, message: '请选择当前状态' }]}>
+            <Select options={Object.entries(scheduledTaskStatusLabels).map(([value, label]) => ({ value, label }))} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" block>确认新增</Button>
+        </Form>
+      </Modal>
 
       <Modal title="修改定时任务" open={!!editingTask} footer={null} destroyOnClose onCancel={() => setEditingTask(null)}>
         {editingTask ? (
-          <Form key={editingTask.id} layout="vertical" initialValues={editingTask} onFinish={saveTask}>
+          <Form key={editingTask.id} layout="vertical" initialValues={taskFormInitialValues(editingTask)} onFinish={saveTask}>
             <Form.Item name="taskName" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }]}><Input /></Form.Item>
-            <Form.Item name="algorithm" label="算法" rules={[{ required: true, message: '请输入算法' }]}><Input /></Form.Item>
-            <Form.Item name="frequency" label="执行频率" rules={[{ required: true, message: '请输入执行频率' }]}><Input /></Form.Item>
-            <Form.Item name="executeTime" label="执行时间" rules={[{ required: true, message: '请输入执行时间' }]}><Input /></Form.Item>
+            <Form.Item name="frequencyKey" label="执行频率" rules={[{ required: true, message: '请选择执行频率' }]}><Select options={taskFrequencyOptions.map(({ label, value }) => ({ label, value }))} /></Form.Item>
+            {renderExecuteTimeSelect()}
             <Form.Item name="status" label="当前状态" rules={[{ required: true, message: '请选择当前状态' }]}>
               <Select options={Object.entries(scheduledTaskStatusLabels).map(([value, label]) => ({ value, label }))} />
             </Form.Item>
@@ -675,30 +892,20 @@ function StrategyPolicyModule({ title, eyebrow, plans, policies, primaryLabel, p
           const policy = findPlanPolicy(plan, policies);
           const status = policy?.status || plan.status;
           return (
-            <article className="strategy-flow-plan" key={plan.id}>
+            <article className="strategy-flow-plan" key={plan.id} role="button" tabIndex={0} onClick={() => onOpenPlan(plan, policy)} onKeyDown={(event) => { if (event.key === 'Enter') onOpenPlan(plan, policy); }}>
               <div className="strategy-flow-plan-head">
                 <div>
                   <div className="strategy-policy-id">策略 ID：{policy?.policy_no || plan.policyNo}</div>
-                  <h3>{plan.title}</h3>
-                  <p>{plan.subtitle}</p>
                 </div>
-                <div className="strategy-plan-gain"><span>预计收益</span><strong>+{money(plan.expectedGain)}/天</strong><StatusTag value={status} /></div>
+                <div className="strategy-plan-gain"><span>预期收益</span><strong>+{money(plan.expectedGain)}/天</strong></div>
               </div>
-              <div className="strategy-flow-list">
-                {plan.flows.map((flow) => (
-                  <div className="strategy-flow-row" key={`${flow.source}-${flow.target}`}>
-                    <span className="strategy-flow-node"><b>{flow.source}</b><small>{flow.sourceModel} {flow.sourceRate}</small></span>
-                    <span className="strategy-flow-arrow">{'->'} {flow.machines}台 {'->'}</span>
-                    <span className="strategy-flow-node target"><b>{flow.target}</b><small>{flow.targetModel} {flow.targetRate}</small></span>
-                    <span className="strategy-flow-gain">+{money(flow.gain)}{plan.kind === 'demand' ? '' : '/天'}</span>
-
-                  </div>
-                ))}
+              <div className="strategy-summary-grid strategy-summary-grid-2">
+                <div><span>当前状态</span><strong><StatusTag value={status} /></strong></div>
+                <div><span>生成时间</span><strong>{dateText(plan.generatedAt)}</strong></div>
               </div>
-              <div className="strategy-plan-actions">
-                <Button size="small" icon={<EyeOutlined />} onClick={() => onOpenPlan(plan, policy)}>详情</Button>
+              <div className="strategy-plan-actions" onClick={(event) => event.stopPropagation()}>
+                <Button size="small" icon={<EyeOutlined />} onClick={() => onOpenPlan(plan, policy)}>查看详情</Button>
                 <Button size="small" type="primary" icon={<CheckCircleOutlined />} disabled={status !== 'draft'} onClick={() => onAcceptPlan(plan, policy)}>人工确认</Button>
-                <Button size="small" icon={<EditOutlined />} onClick={() => onEditPlan(plan, policy)}>修改</Button>
                 <Button size="small" danger icon={<StopOutlined />} disabled={status === 'cancelled'} onClick={() => onAbandonPlan(plan, policy)}>放弃</Button>
               </div>
             </article>
@@ -757,7 +964,7 @@ function StrategyPlanDetail({ plan, policy, detail }: StrategyPlanDetailProps) {
           <Table<StrategyFlow>
             className="strategy-table strategy-report-table"
             size="small"
-            rowKey={(record) => `${record.source}-${record.target}-${record.machines}`}
+            rowKey={(record, index) => `${record.source}-${record.target}-${record.machines}-${index}`}
             dataSource={plan.flows}
             pagination={false}
             scroll={{ x: 'max-content' }}
@@ -947,6 +1154,14 @@ export function StrategyDashboard() {
       message.warning('未找到可修改的策略记录');
       return;
     }
+    if (plan.kind === 'demand') {
+      message.warning('需求评估方案不支持在此修改机器台数和水位线');
+      return;
+    }
+    if (targetPolicy.status === 'accepted') {
+      message.warning('策略已人工确认，不能再修改');
+      return;
+    }
     setSelectedPlan(plan);
     setSelected(targetPolicy);
     void policiesApi.detail(targetPolicy.id).then(setDetail);
@@ -972,9 +1187,35 @@ export function StrategyDashboard() {
 
 
 
-  async function saveScheduledTask(task: ScheduledTask) {
+  async function createScheduledTask(values: ScheduledTaskFormValues) {
     try {
-      await jobsApi.patch(task.id, { enabled: task.status !== 'paused' });
+      const payload = schedulePayload(values);
+      const created = await jobsApi.create({
+        description: values.taskName,
+        trigger_type: payload.trigger_type,
+        cron_expr: payload.cron_expr,
+        interval_seconds: payload.interval_seconds,
+        enabled: values.status !== 'paused',
+      });
+      message.success('定时任务已新增');
+      await jobs.reload();
+      return scheduledTaskFromJob(created);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '定时任务新增失败');
+      return null;
+    }
+  }
+
+  async function saveScheduledTask(task: ScheduledTask, values: ScheduledTaskFormValues) {
+    try {
+      const payload = schedulePayload(values);
+      await jobsApi.patch(task.id, {
+        description: values.taskName,
+        trigger_type: payload.trigger_type,
+        cron_expr: payload.cron_expr,
+        interval_seconds: payload.interval_seconds,
+        enabled: values.status !== 'paused',
+      });
       message.success('定时任务已保存');
       await jobs.reload();
     } catch (error) {
@@ -982,23 +1223,23 @@ export function StrategyDashboard() {
     }
   }
 
-  async function patch(values: { summary_json?: string; constraints_json?: string; expected_revenue_gain?: string; effective_from?: string; effective_to?: string }) {
-
-    if (!selected) return;
+  async function patch(values: StrategyEditFormValues) {
+    if (!selected || !selectedPlan) return;
+    if (selected.status === 'accepted') {
+      message.warning('策略已人工确认，不能再修改');
+      setEditOpen(false);
+      return;
+    }
     setSubmitting(true);
     try {
-      await policiesApi.patch(selected.id, {
-        summary_json: parseJsonObject(values.summary_json),
-        constraints_json: parseJsonObject(values.constraints_json),
-        expected_revenue_gain: values.expected_revenue_gain ? Number(values.expected_revenue_gain) : undefined,
-        effective_from: values.effective_from || undefined,
-        effective_to: values.effective_to || undefined,
+      const patched = await policiesApi.patch(selected.id, {
+        summary_json: applyStrategyEdits(selected, values),
       });
       message.success('策略已修改');
       setEditOpen(false);
       await policies.reload();
       await demandPolicyList.reload();
-      if (selectedPlan) await openPlanDetail(selectedPlan, selected);
+      await openPlanDetail(timePeriodPlanFromPolicy(patched, selectedPlan.kind === 'busy' ? 'busy' : 'idle'), patched);
 
     } finally {
       setSubmitting(false);
@@ -1021,7 +1262,7 @@ export function StrategyDashboard() {
           <EvaluationModule evaluations={evaluationItems} policies={demandPolicies} onCreate={() => openCreate('demand_evaluation')} onReload={() => { void policies.reload(); void demandPolicyList.reload(); void evaluations.reload(); }} onOpenPlan={openPlanDetail} onAcceptPlan={acceptPlan} onRejectPlan={abandonPlan} onOpenDemand={(demandId) => navigate(`/demands/${demandId}`)} />
 
           <FittingStrategyModule strategies={fittingStrategies} onChange={setFittingStrategies} />
-          <ScheduledTaskModule tasks={taskRows} onChange={setTaskRows} onSaveTask={saveScheduledTask} />
+          <ScheduledTaskModule tasks={taskRows} onChange={setTaskRows} onCreateTask={createScheduledTask} onSaveTask={saveScheduledTask} />
 
           <StrategyPolicyModule title="闲时策略" eyebrow="Idle" plans={idlePlans} policies={idlePolicies} primaryLabel="低峰收益" primaryValue={idleGain || totalBy(idlePlans, (plan) => plan.expectedGain)} onCreate={() => openCreate('idle')} onOpenPlan={openPlanDetail} onAcceptPlan={acceptPlan} onEditPlan={editPlan} onAbandonPlan={abandonPlan} />
           <StrategyPolicyModule title="忙时策略" eyebrow="Busy" plans={busyPlans} policies={busyPolicies} primaryLabel="忙时收益" primaryValue={busyGain || totalBy(busyPlans, (plan) => plan.expectedGain)} onCreate={() => openCreate('busy')} onOpenPlan={openPlanDetail} onAcceptPlan={acceptPlan} onEditPlan={editPlan} onAbandonPlan={abandonPlan} />
@@ -1034,20 +1275,44 @@ export function StrategyDashboard() {
           <Button loading={submitting} type="primary" htmlType="submit" block>生成</Button>
         </Form>
       </Modal>
-      <Drawer title="方案详情" open={!!selectedPlan} onClose={() => { setSelected(null); setSelectedPlan(null); setDetail(null); }} width={980}>
-        {selectedPlan && <Space className="strategy-detail-actions"><Button icon={<EditOutlined />} onClick={() => editPlan(selectedPlan, selected)}>修改</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={selectedPlan.kind === 'demand' ? !['pending', 'evaluating'].includes(selectedPlan.status) : (selected?.status || selectedPlan.status) !== 'draft'} onClick={() => acceptPlan(selectedPlan, selected)}>{selectedPlan.kind === 'demand' ? '确认' : '人工确认'}</Button><Button danger icon={<StopOutlined />} disabled={selectedPlan.kind === 'demand' ? ['approved', 'rejected'].includes(selectedPlan.status) : (selected?.status || selectedPlan.status) === 'cancelled'} onClick={() => abandonPlan(selectedPlan, selected)}>{selectedPlan.kind === 'demand' ? '驳回' : '放弃'}</Button></Space>}
+      <Drawer title="方案详情" rootClassName="strategy-detail-drawer" open={!!selectedPlan} onClose={() => { setSelected(null); setSelectedPlan(null); setDetail(null); }} width={980}>
+
+        {selectedPlan && <Space className="strategy-detail-actions"><Button icon={<EditOutlined />} disabled={selectedPlan.kind === 'demand' || (selected?.status || selectedPlan.status) === 'accepted'} onClick={() => editPlan(selectedPlan, selected)}>修改</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={selectedPlan.kind === 'demand' ? !['pending', 'evaluating'].includes(selectedPlan.status) : (selected?.status || selectedPlan.status) !== 'draft'} onClick={() => acceptPlan(selectedPlan, selected)}>{selectedPlan.kind === 'demand' ? '确认' : '人工确认'}</Button><Button danger icon={<StopOutlined />} disabled={selectedPlan.kind === 'demand' ? ['approved', 'rejected'].includes(selectedPlan.status) : (selected?.status || selectedPlan.status) === 'cancelled'} onClick={() => abandonPlan(selectedPlan, selected)}>{selectedPlan.kind === 'demand' ? '驳回' : '放弃'}</Button></Space>}
 
         {selectedPlan ? <StrategyPlanDetail plan={selectedPlan} policy={selected} detail={detail} /> : null}
       </Drawer>
-      <Modal title="修改策略" open={editOpen} footer={null} onCancel={() => setEditOpen(false)}>
-        <Form layout="vertical" onFinish={patch} initialValues={{ summary_json: JSON.stringify(detail?.policy.summary_json || {}, null, 2), constraints_json: JSON.stringify(detail?.policy.constraints_json || {}, null, 2), expected_revenue_gain: String(detail?.policy.expected_revenue_gain || '') }}>
-          <Form.Item name="summary_json" label="策略摘要 JSON"><Input.TextArea rows={4} /></Form.Item>
-          <Form.Item name="constraints_json" label="约束 JSON"><Input.TextArea rows={4} /></Form.Item>
-          <Form.Item name="expected_revenue_gain" label="预估收益"><Input /></Form.Item>
-          <Form.Item name="effective_from" label="生效时间"><Input placeholder="ISO 时间" /></Form.Item>
-          <Form.Item name="effective_to" label="结束时间"><Input placeholder="ISO 时间" /></Form.Item>
-          <Button loading={submitting} type="primary" htmlType="submit" block>保存</Button>
-        </Form>
+      <Modal title="修改策略" open={editOpen} footer={null} onCancel={() => setEditOpen(false)} width={760}>
+        {selectedPlan ? (
+          <Form key={selectedPlan.id} layout="vertical" onFinish={patch} initialValues={strategyEditInitialValues(selectedPlan)}>
+            {selectedPlan.flows.length ? (
+              <section className="strategy-edit-section">
+                <h3>机器腾挪台数</h3>
+                {selectedPlan.flows.map((flow, index) => (
+                  <div className="strategy-edit-row" key={`${flow.source}-${flow.target}-${index}`}>
+                    <div><strong>{flow.source} {'->'} {flow.target}</strong><small>{flow.sourceModel} {'->'} {flow.targetModel}</small></div>
+                    <Form.Item name={['flows', index, 'machines']} rules={[{ required: true, message: '请输入腾挪台数' }]}>
+                      <InputNumber min={0} precision={0} addonAfter="台" />
+                    </Form.Item>
+                  </div>
+                ))}
+              </section>
+            ) : null}
+            {selectedPlan.attributions.length ? (
+              <section className="strategy-edit-section">
+                <h3>切量水位线</h3>
+                {selectedPlan.attributions.map((item, index) => (
+                  <div className="strategy-edit-row" key={`${item.customer}-${item.model}-${index}`}>
+                    <div><strong>{item.customer}</strong><small>{item.model} 当前 {numberText(item.beforeVolume)} 万TPM</small></div>
+                    <Form.Item name={['attributions', index, 'watermark']} rules={[{ required: true, message: '请输入切量水位线' }]}>
+                      <InputNumber min={0} precision={2} addonAfter="万TPM" />
+                    </Form.Item>
+                  </div>
+                ))}
+              </section>
+            ) : null}
+            <Button loading={submitting} type="primary" htmlType="submit" block>保存修改</Button>
+          </Form>
+        ) : null}
       </Modal>
     </>
   );

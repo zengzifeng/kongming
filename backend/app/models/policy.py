@@ -19,6 +19,8 @@ class Policy(BaseModel):
     demand_id: Mapped[int | None] = mapped_column(ForeignKey("demands.id"), nullable=True, index=True)
     policy_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     algorithm: Mapped[str] = mapped_column(String(32), default="realtime")
+    # 策略场景：demand_evaluation(需求评估) / idle(闲时) / busy(忙时)——前端分区展示依据
+    scenario: Mapped[str] = mapped_column(String(24), default="demand_evaluation", index=True)
     summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
     expected_revenue_gain: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     expected_peak_shaving_gain: Mapped[float] = mapped_column(Numeric(18, 2), default=0)

@@ -8,7 +8,7 @@ from .revenue_jobs import customer_usage_daily, revenue_after_snapshot
 from .report_jobs import monthly_report, weekly_report
 from .sync_filing_jobs import sync_filings_hourly
 from .policy_jobs import policy_auto_run
-from .monitor_jobs import resource_monitor_collect, usage_hourly_aggregate
+from .monitor_jobs import resource_monitor_collect, usage_hourly_aggregate, vendor_runtime_sync_fixed
 
 
 # 任务名 -> 可调用（均接受 app 作为首参；额外参数由 job_schedules.args_json 提供）。
@@ -20,7 +20,6 @@ JOB_REGISTRY = {
     "monthly_report": monthly_report,
     "policy_auto_run": policy_auto_run,
     "resource_monitor_collect": resource_monitor_collect,
-    "usage_hourly_aggregate": usage_hourly_aggregate,
 }
 
 # 默认调度配置：首次启动时 seed 到 job_schedules 表（幂等，不覆盖已存在项）。
@@ -41,8 +40,6 @@ DEFAULT_SCHEDULES = [
      "args_json": {"algorithm": "time_period"}},
     {"job_name": "resource_monitor_collect", "description": "资源模型监控数据采集（每小时）",
      "trigger_type": "cron", "cron_expr": "5 * * * *"},
-    {"job_name": "usage_hourly_aggregate", "description": "consumer_model_tpm 小时聚合写入 usage_hourly",
-     "trigger_type": "cron", "cron_expr": "10 * * * *"},
 ]
 
 
@@ -98,9 +95,36 @@ def build_trigger(schedule):
                                     timezone="Asia/Shanghai")
 
 
+def add_fixed_backend_jobs(scheduler: BackgroundScheduler, app) -> None:
+    """注册不可通过 job_schedules 管理的固定后端逻辑。"""
+    scheduler.add_job(
+        vendor_runtime_sync_fixed,
+        IntervalTrigger(seconds=60, timezone="Asia/Shanghai"),
+        args=[app],
+        id="vendor_runtime_sync_fixed",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    if app.config.get("USAGE_HOURLY_AGGREGATE_ENABLED", True):
+        scheduler.add_job(
+            usage_hourly_aggregate,
+            CronTrigger.from_crontab(
+                app.config.get("USAGE_HOURLY_AGGREGATE_CRON", "10 * * * *"),
+                timezone="Asia/Shanghai",
+            ),
+            args=[app],
+            id="usage_hourly_aggregate_fixed",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+
 def add_job_from_schedule(scheduler: BackgroundScheduler, app, schedule) -> None:
     """按一条 JobSchedule 注册/替换任务；enabled=False 则移除已存在任务。"""
     func = JOB_REGISTRY.get(schedule.job_name)
+
     if func is None:
         app.logger.warning("未知任务名，跳过调度: %s", schedule.job_name)
         return
@@ -130,8 +154,10 @@ def start_scheduler(app):
         schedules = list(db.session.execute(db.select(JobSchedule)).scalars())
         for schedule in schedules:
             add_job_from_schedule(scheduler, app, schedule)
+        add_fixed_backend_jobs(scheduler, app)
 
     scheduler.start()
+
     _scheduler = scheduler
     app.logger.info("Scheduler started with jobs: %s", [j.id for j in scheduler.get_jobs()])
 

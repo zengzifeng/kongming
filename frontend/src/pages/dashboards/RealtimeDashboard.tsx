@@ -332,13 +332,21 @@ function buildShareRuntime(items: ConsumerTpmSnapshot[]) {
   return { data, lines, summary: buildSummary(data, lines, formatPercentAxis) };
 }
 
+function hasVisibleFittingSeries(result: FittingResult) {
+  return (result.series_json || []).some(([, value]) => Number.isFinite(Number(value)) && Math.abs(Number(value)) > 0);
+}
+
+function sortLatestFittingResults(results: FittingResult[]) {
+  return [...results].sort((a, b) => String(b.generated_at || '').localeCompare(String(a.generated_at || '')));
+}
+
 function buildFittingChart(results: FittingResult[]) {
   // 结果按 generated_at 倒序，按集群去重取首条（即最新批次），避免多次跑拟合产生重复线；
-  // 不再 slice(0,6) 截断，展示全部 watched 集群。
+  // 空序列/全 0 序列不生成 legend，避免 legend 有项但图中没有可见曲线。
   const byCluster = new Map<string, FittingResult>();
-  results.forEach((item) => {
+  sortLatestFittingResults(results).forEach((item) => {
     const key = item.cluster_name || item.ai_consumer || item.model_name;
-    if (key && !byCluster.has(key)) byCluster.set(key, item);
+    if (key && hasVisibleFittingSeries(item) && !byCluster.has(key)) byCluster.set(key, item);
   });
   const selected = Array.from(byCluster.values());
   const lines = selected.map((item, index) => ({
@@ -369,14 +377,20 @@ function buildFittingChart(results: FittingResult[]) {
 
 function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnapshot[]): CustomerFitWave[] {
   const byModel = new Map<string, FittingResult[]>();
-  results.forEach((result) => {
+  sortLatestFittingResults(results).forEach((result) => {
+    if (!hasVisibleFittingSeries(result)) return;
     const items = byModel.get(result.model_name) || [];
     items.push(result);
     byModel.set(result.model_name, items);
   });
   return Array.from(byModel.entries()).map(([model, modelResults]) => {
-    // 不再 slice(0,6)：展示该模型下全部客户（如 glm-5.2 有 8 个客户）。
-    const selected = modelResults;
+    // 不再 slice(0,6)：展示该模型下全部有有效拟合序列的客户；同一客户只取最新一条。
+    const byCustomer = new Map<string, FittingResult>();
+    modelResults.forEach((result) => {
+      const key = result.ai_consumer || result.cluster_name || result.model_name;
+      if (key && !byCustomer.has(key)) byCustomer.set(key, result);
+    });
+    const selected = Array.from(byCustomer.values());
     const lines = selected.map((result, index) => ({
       key: `customer${index}`,
       name: result.ai_consumer || result.cluster_name || result.model_name,
@@ -417,7 +431,7 @@ function formatTpm(value: number) {
   return String(value);
 }
 
-// 集群拟合波形专用：以 Mil(百万TPM) 为单位、保留 1 位小数。
+// 拟合波形按原始 TPM 入图，展示时换算为 Mil(百万TPM)。
 function formatTpmMillionsAxis(value: number) {
   return (value / 1000000).toFixed(1);
 }
@@ -429,6 +443,7 @@ function formatTpmMillionsTip(value: number) {
 function formatPercentAxis(value: number) {
   return `${value.toFixed(2)}%`;
 }
+
 
 function toWanTpm(value?: number | null) {
   return Number(((Number(value || 0)) / 10000).toFixed(2));
@@ -444,10 +459,15 @@ function rawJsonValue(row: VendorQuota, key: string) {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
 }
 
+function normalizeModelName(value: string) {
+  return value.trim().toLowerCase();
+}
+
 function buildVendorModelGroups(rows: VendorRuntimeRow[]): VendorModelGroup[] {
-  return Array.from(new Set(rows.map((row) => row.modelName))).map((modelName) => {
-    const groupRows = rows.filter((row) => row.modelName === modelName);
+  return Array.from(new Set(rows.map((row) => normalizeModelName(row.modelName)))).map((modelName) => {
+    const groupRows = rows.filter((row) => normalizeModelName(row.modelName) === modelName);
     const quotaW = groupRows.reduce((total, row) => total + row.quotaW, 0);
+
     const onlineRuntime = groupRows.reduce((total, row) => total + row.onlineRuntime, 0);
     const redundantRuntime = groupRows.reduce((total, row) => total + row.redundantRuntime, 0);
     return {
@@ -489,7 +509,8 @@ function mapVendorQuota(row: VendorQuota): VendorRuntimeRow {
     id: String(row.id),
     vendorName: row.vendor,
     providerName: rawJsonValue(row, 'provider'),
-    modelName: row.model,
+    modelName: normalizeModelName(row.model),
+
     quotaW,
     purchaseDiscount: Number(row.purchase_discount || 0),
     purchaseDiscountText: formatDiscount(row.purchase_discount),
@@ -547,6 +568,10 @@ function CapacityBarShape({ x = 0, y = 0, width = 0, height = 0, payload }: Capa
 function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yFormatter, tooltipFormatter, tooltipSingleKey, selectedLineKey, hoveredLineKey, legendRenderer, referenceLines, onLineClick, forceSolidLines }: RuntimeLineChartProps) {
   // 选中或悬停的线优先高亮，其余变暗；悬停优先级高于选中。
   const focusKey = hoveredLineKey ?? selectedLineKey ?? null;
+  const pointCountByLine = new Map(lines.map((line) => [
+    line.key,
+    data.reduce((count, point) => (point[line.key] == null ? count : count + 1), 0),
+  ]));
   // tooltip 只显示单条线时，预解析该线的名称/颜色。
   const singleLine = tooltipSingleKey ? lines.find((l) => l.key === tooltipSingleKey) : null;
   return (
@@ -569,10 +594,12 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
               content={tooltipSingleKey && singleLine ? (props) => {
                 const { label, payload } = props as { label?: string; payload?: Array<{ dataKey?: string; value?: number | string }> };
                 const hit = payload?.find((p) => p.dataKey === tooltipSingleKey);
-                const raw = hit ? Number(hit.value ?? 0) : 0;
+                if (!hit || hit.value == null || !Number.isFinite(Number(hit.value))) return null;
+                const raw = Number(hit.value);
                 const text = tooltipFormatter ? tooltipFormatter(raw) : String(raw);
                 return (
                   <div style={{ background: '#071018', border: '1px solid rgba(82, 191, 255, .28)', borderRadius: 8, padding: '6px 10px', fontSize: 12 }}>
+
                     <div style={{ color: '#e6f7ff', marginBottom: 2 }}>{label}</div>
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#b8d5e0' }}>
                       <i style={{ width: 12, height: 3, borderRadius: 999, background: singleLine.color, display: 'inline-block' }} />
@@ -589,6 +616,7 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
               const isSelected = selectedLineKey === line.key;
               const isHovered = hoveredLineKey === line.key;
               const isDimmed = Boolean(focusKey && focusKey !== line.key);
+              const shouldShowDot = Number(pointCountByLine.get(line.key) || 0) < 2;
               return (
                 <Line
                   key={line.key}
@@ -600,7 +628,7 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
                   strokeDasharray={forceSolidLines ? undefined : line.strokeDasharray}
                   strokeOpacity={isDimmed ? 0.28 : 1}
 
-                  dot={false}
+                  dot={shouldShowDot ? { r: 3, strokeWidth: 0 } : false}
                   activeDot={onLineClick ? { r: 4, onClick: () => onLineClick(line.key) } : false}
                   isAnimationActive={false}
                   onClick={onLineClick ? () => onLineClick(line.key) : undefined}

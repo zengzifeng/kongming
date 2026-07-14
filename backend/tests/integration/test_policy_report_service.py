@@ -2,7 +2,8 @@
 汇结构化报告 payload，验证元/天折算、单TPM收入、集群利用率、以及收益对账。"""
 from app.extensions import db
 from app.models import MonitorConsumer, Policy, PolicyRun
-from app.services.policy_report_service import PolicyReportService, Y
+from app.services.policy_report_service import PolicyReportService
+
 
 
 def _seed_policy(app):
@@ -27,7 +28,8 @@ def _seed_policy(app):
         "params": {"model_prices": {
             "m": {"input_cache_hit_price": 0.0002, "input_cache_miss_price": 0.001, "output_price": 0.002}}},
     }
-    gain = 1_000_000.0  # 积分口径；expected_revenue_gain 设为同值 → Σattribution 应对账
+    gain = 1_000_000.0  # 已是元/天（求解器已积分换算）；expected_revenue_gain 同值 → Σattribution 对账
+
     summary = {
         "watermark_changes": [{
             "customer_code": "C0300", "model": "m", "watermark_self_tpm": 200.0,
@@ -69,9 +71,10 @@ def _seed_policy(app):
 def test_report_kpis_and_reconciliation(app):
     policy = _seed_policy(app)
     rep = PolicyReportService().build(policy.id)
-    # KPI 元/天
-    assert abs(rep["kpis"]["expected_revenue_gain_yuan_day"] - 1_000_000.0 * Y) < 1e-6
-    assert abs(rep["kpis"]["self_revenue_before_yuan_day"] - 4_000_000.0 * Y) < 1e-6
+    # KPI 元/天（求解器已换算成元，报告层直接透传）
+    assert abs(rep["kpis"]["expected_revenue_gain_yuan_day"] - 1_000_000.0) < 1e-6
+    assert abs(rep["kpis"]["self_revenue_before_yuan_day"] - 4_000_000.0) < 1e-6
+
     # 逐调整收益对账：Σattribution 收益 ≈ KPI 提升
     total = sum(a["gain_yuan_day"] for a in rep["attributions"])
     assert abs(total - rep["kpis"]["expected_revenue_gain_yuan_day"]) < 1e-6
@@ -85,7 +88,8 @@ def test_report_attribution_and_unit_example(app):
     assert a["customer"] == "报告客户"          # code→name 映射
     assert a["model"] == "m"
     assert a["unit_self_revenue"] > 0            # 单TPM收入(元/百万token)
-    assert abs(a["gain_yuan_day"] - 1_000_000.0 * Y) < 1e-6
+    assert abs(a["gain_yuan_day"] - 1_000_000.0) < 1e-6
+
     # 单TPM收入示例：公式代入自洽，且与 attribution 的 unit 一致
     ex = rep["unit_example"]
     assert ex is not None
@@ -103,6 +107,7 @@ def test_report_cluster_utilization_and_rebalance(app):
     assert cu["m"]["shared_occupancy"] == 200.0 / 500.0  # Σ水位线 / 共享容量
     # 模型级再平衡：元/天 折算 + 客户名 + 流向聚合
     rb = rep["model_rebalance"]
-    assert abs(rb["extra_gain_yuan_day"] - 200_000.0 * Y) < 1e-6
+    assert abs(rb["extra_gain_yuan_day"] - 200_000.0) < 1e-6
+
     assert rb["flows"] and rb["flows"][0]["from_cluster"] == "self-A"
     assert rb["per_cluster"][0]["gainers"][0]["customer"] == "报告客户"

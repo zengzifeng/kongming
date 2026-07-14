@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from math import ceil
 
 from ..utils.errors import AlgorithmError
+
 from ._shared import SolverEconomicsMixin
 from .base import (
     ConstraintHit,
@@ -15,6 +17,10 @@ from .base import (
 
 # 浮点护栏：容量求和会有残差，用它判断“缺口是否已实质填满 / 是否还有可分配容量”。
 EPS = 1e-6
+# 收益护栏：收益已按「元」口径（TPM×分钟÷1e6×单价），量级远小于 TPM，故用独立的更细阈值，
+# 避免用 TPM 尺度的 EPS 误判「微小但真实为正」的收益改进。
+REV_EPS = 1e-9
+
 
 
 @dataclass
@@ -55,7 +61,8 @@ class TimePeriodSolver(SolverEconomicsMixin):
         # 峰值可行性硬约束基准：逐模型客户波形总需求峰值 / 三方额度 / 需保留的最小自建容量。
         # min_self_required = max(0, 峰值 − 三方额度)：三方接不住的那部分峰值必须由自建兜底，
         # 是「机器最多能挪走到什么程度」的物理下限（削峰可把峰值外抛给三方，但外抛不掉的必须留自建）。
-        peak_demand = self._peak_demand_by_model(snapshot.demands, timeline)
+        peak_demand = self._peak_demand_by_model(snapshot.demands, timeline, clusters)
+
         vendor_cap = self._vendor_cap_by_model(vendors)
         min_self_required = {m: max(0.0, peak_demand.get(m, 0.0) - vendor_cap.get(m, 0.0))
                              for m in peak_demand}
@@ -68,6 +75,12 @@ class TimePeriodSolver(SolverEconomicsMixin):
         machines_before = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
         node_moves, accepted, rejected = self._plan_reallocation(
             candidates, clusters, rejected, timeline, min_self_required)
+        # C 阶段腾挪也遵守「整体自建收入净增」门槛（与 C2 一致）：把 C 产出的 moves 从「无腾挪」基线
+        # 起逐条重放，只保留真正抬高全体自建收入积分的腾挪，其余回滚——避免关注集群内产能不足时，
+        # 为覆盖某模型忙时峰值而拆掉更高价值模型的机器、导致整体自建收入不升反降。
+        node_moves = self._keep_net_positive_moves(
+            candidates, clusters, timeline, node_moves, machines_before)
+
 
         # ---- C2. 模型级供需再平衡（跨模型抢机器）：把「容量≫峰值需求」的富余模型机器，挪给
         #      「需求>容量、量堆三方」的紧缺模型。**solver 内默认关**（保持直接调用/既有测试基线不变）；
@@ -79,6 +92,22 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 candidates, clusters, timeline, peak_demand, vendor_cap)
             node_moves = node_moves + moves2
         machines_after = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
+        # 集群粒度聚合：同一 (源集群→目标集群, 模型) 的多次腾挪合并成一条，避免海量单机记录。
+        node_moves = self._aggregate_node_moves(node_moves)
+        # 集群当前实跑/单机承载（腾挪不改变这两者，只改机器数），用于推导腾挪前后利用率。
+        cluster_meta = {
+            c["cluster_name"]: {
+                "current_tpm": float(c.get("current_tpm", 0) or 0),
+                "rate": float(c.get("tpm_per_machine", 0) or 0),
+            }
+            for c in clusters
+        }
+        self._enrich_move_utilization(node_moves, cluster_meta, machines_before, machines_after)
+        # 模型级再平衡的 moves 同样聚合（报告/前端会读 summary.model_rebalance.moves）。
+        if rebalance_diag.get("moves"):
+            rebalance_diag["moves"] = self._aggregate_node_moves(rebalance_diag["moves"])
+            self._enrich_move_utilization(rebalance_diag["moves"], cluster_meta, machines_before, machines_after)
+
 
         # 成案终检：机器挪动后，逐模型「自建+三方」是否仍覆盖该模型客户波形峰值。
         feasibility = self._check_peak_feasibility(clusters, peak_demand, vendor_cap)
@@ -95,8 +124,12 @@ class TimePeriodSolver(SolverEconomicsMixin):
         # ---- 时序积分：before/after 都对**全体候选**积分（wm=0 的被削客户 after 自建=0、before=当前自建），
         #      这样把"当前自建被削峰挖回三方"的损失正确计入 gain，不虚高。 ----
         after = self._integrate(considered, watermarks, timeline, adjust=True)
-        before = self._integrate(considered, watermarks, timeline, adjust=False)
+        # before 基线（现状自建）也必须只算「关注集群实际能承接」的量：现状自建占比作用在拟合忙时
+        # 峰值波形上，若不按物理产能封顶，会得到集群根本跑不出的自建量，使 after 恒低于 before、假性亏损。
+        # 用挪机器前(machines_before)的产能、按 _draw（含专属集群归属）逐时点给现状自建量封顶。
+        before = self._before_self_revenue(considered, clusters, timeline, machines_before)
         revenue_gain = after["self_revenue"] - before["self_revenue"]
+
         accepted = kept                  # 汇总/约束里的 accepted 只列真正拿到自建的客户
 
         # ---- E. 约束体检 ----
@@ -155,7 +188,112 @@ class TimePeriodSolver(SolverEconomicsMixin):
             },
         )
 
+    def _keep_net_positive_moves(self, candidates, clusters, timeline, moves, machines_before) -> list[dict]:
+        """把 C 阶段产出的 moves 从「无腾挪」基线起逐条重放，只保留使全体自建收入积分净增的腾挪。
+
+        C 阶段（_plan_reallocation）按每机器面积/机会成本贪心覆盖峰值缺口，缺口覆盖本身不保证整体
+        自建收入上升——尤其关注集群内产能不足时，为承接某模型忙时峰值而拆走更高价值模型的机器会net亏。
+        这里复用 D 阶段的水位积分口径，对每条腾挪做「整体净增>REV_EPS 才保留」的门槛（与 C2 一致），
+        并就地把 clusters.machine_count 收敛到保留后的状态。"""
+        if not moves:
+            return moves
+        by_name = {c["cluster_name"]: c for c in clusters}
+
+        def apply(mv, sign):
+            src, tgt = mv.get("from_cluster"), mv.get("to_cluster")
+            n = int(mv.get("machine_count", 0) or 0) * sign
+            if src in by_name:
+                by_name[src]["machine_count"] = int(by_name[src].get("machine_count", 0) or 0) - n
+            if tgt in by_name:
+                by_name[tgt]["machine_count"] = int(by_name[tgt].get("machine_count", 0) or 0) + n
+
+        def total_self_revenue():
+            wm, _ = self._compute_watermarks(candidates, clusters, timeline)
+            return self._integrate(candidates, wm, timeline, adjust=True)["self_revenue"]
+
+        # 先整体回滚到无腾挪基线（machines_before），再逐条重放。
+        for name, cnt in machines_before.items():
+            if name in by_name:
+                by_name[name]["machine_count"] = int(cnt or 0)
+        cur_rev = total_self_revenue()
+        kept: list[dict] = []
+        for mv in moves:
+            apply(mv, +1)
+            new_rev = total_self_revenue()
+            if new_rev - cur_rev > REV_EPS:
+                kept.append(mv)
+                cur_rev = new_rev
+            else:
+                apply(mv, -1)  # 非净增 → 回滚这条腾挪
+        return kept
+
+    @staticmethod
+    def _aggregate_node_moves(moves: list[dict]) -> list[dict]:
+        """按 (源集群, 目标集群, 模型) 聚合腾挪记录：台数/产能相加，合并成一条，供出更清爽的方案。"""
+        agg: dict[tuple, dict] = {}
+        order: list[tuple] = []
+        for mv in moves:
+            key = (mv.get("from_cluster"), mv.get("to_cluster"), mv.get("model"))
+            a = agg.get(key)
+            if a is None:
+                a = agg[key] = {
+                    "from_cluster": mv.get("from_cluster"),
+                    "to_cluster": mv.get("to_cluster"),
+                    "model": mv.get("model"),
+                    "machine_count": 0,
+                    "added_tpm": 0.0,
+                    "removed_tpm": 0.0,
+                    "from_tpm_per_machine": mv.get("from_tpm_per_machine"),
+                    "to_tpm_per_machine": mv.get("to_tpm_per_machine"),
+                    "gain": 0.0,
+                    "merged_count": 0,
+                }
+                order.append(key)
+            a["machine_count"] += int(mv.get("machine_count", 0) or 0)
+            a["added_tpm"] += float(mv.get("added_tpm", 0.0) or 0.0)
+            a["removed_tpm"] += float(mv.get("removed_tpm", 0.0) or 0.0)
+            a["gain"] += float(mv.get("gain", 0.0) or 0.0)
+            a["merged_count"] += 1
+        result = []
+        for key in order:
+            a = agg[key]
+            a["reason"] = (f"{a['from_cluster']} → {a['to_cluster']} 腾挪 {a['machine_count']} 台"
+                           f"（{a['model']}，合并 {a['merged_count']} 次调整）")
+            result.append(a)
+        result.sort(key=lambda x: x["machine_count"], reverse=True)
+        return result
+
+    @staticmethod
+    def _enrich_move_utilization(moves: list[dict], cluster_meta: dict[str, dict],
+                                 machines_before: dict[str, int],
+                                 machines_after: dict[str, int]) -> None:
+        """给每条腾挪记录补源/目标集群的腾挪前后利用率。
+
+        利用率 = 集群当前实跑 TPM / 集群总承载(机器数 × 单机承载)。当前实跑与单机承载
+        取自资源快照（cluster_model_tpm.tpm / cluster_capacities.tpm_per_machine），腾挪只改机器数。
+        总承载为 0（无机器/无单机承载）时利用率记 0。
+        """
+        def util(name: str, machines_map: dict[str, int]) -> float:
+            meta = cluster_meta.get(name)
+            if not meta:
+                return 0.0
+            rate = float(meta.get("rate", 0) or 0)
+            machines = int(machines_map.get(name, 0) or 0)
+            capacity = machines * rate
+            if capacity <= 0:
+                return 0.0
+            return float(meta.get("current_tpm", 0) or 0) / capacity
+
+        for mv in moves:
+            src = mv.get("from_cluster")
+            dst = mv.get("to_cluster")
+            mv["source_utilization_before"] = util(src, machines_before)
+            mv["source_utilization_after"] = util(src, machines_after)
+            mv["target_utilization_before"] = util(dst, machines_before)
+            mv["target_utilization_after"] = util(dst, machines_after)
+
     # ---------------- A + B ----------------
+
     def _timeline(self, demands: list[DemandSnapshotItem]) -> list[str]:
         """所有客户序列并集的有序时间轴；若无序列则退化为单点。"""
         stamps: set[str] = set()
@@ -165,14 +303,30 @@ class TimePeriodSolver(SolverEconomicsMixin):
         return sorted(stamps) if stamps else ["_flat_"]
 
     # ---------------- 峰值可行性（硬约束基准） ----------------
-    def _peak_demand_by_model(self, demands: list[DemandSnapshotItem], timeline: list[str]) -> dict[str, float]:
-        """逐模型：所有客户波形在同一时点求和后，取全时段峰值 = 该模型客户总需求峰值。"""
+    def _peak_demand_by_model(self, demands: list[DemandSnapshotItem], timeline: list[str],
+                              clusters: list[dict] | None = None) -> dict[str, float]:
+        """逐模型：所有客户波形在同一时点求和后，取全时段峰值 = 该模型客户总需求峰值。
+
+        专属集群绑定的客户需求不计入共享峰值（他们由自己的专属集群兜底，不与共享池混算）。"""
+        dedicated_pairs = self._dedicated_owner_pairs(clusters or [])
         by_model_ts: dict[str, dict[str, float]] = {}
         for d in demands:
+            if (d.customer_code, (d.model_name or "").lower()) in dedicated_pairs:
+                continue
             for ts, tpm in self._series_of(d, timeline):
                 by_model_ts.setdefault(d.model_name, {}).setdefault(ts, 0.0)
                 by_model_ts[d.model_name][ts] += float(tpm)
         return {m: (max(v.values()) if v else 0.0) for m, v in by_model_ts.items()}
+
+    @staticmethod
+    def _dedicated_owner_pairs(clusters: list[dict]) -> set[tuple[str, str]]:
+        """专属集群绑定的 (客户 code, 模型小写) 集合：这些需求归专属集群，不进共享池。"""
+        pairs: set[tuple[str, str]] = set()
+        for c in clusters:
+            if c.get("dedicated") and c.get("dedicated_owner_code"):
+                pairs.add((c["dedicated_owner_code"], str(c.get("deployed_model", "")).lower()))
+        return pairs
+
 
     def _vendor_cap_by_model(self, vendors: list[dict]) -> dict[str, float]:
         cap: dict[str, float] = {}
@@ -183,9 +337,12 @@ class TimePeriodSolver(SolverEconomicsMixin):
     def _self_cap_by_model(self, clusters: list[dict]) -> dict[str, float]:
         cap: dict[str, float] = {}
         for c in clusters:
+            if c.get("dedicated"):
+                continue  # 专属集群产能不并入共享模型池
             cap[c["deployed_model"]] = cap.get(c["deployed_model"], 0.0) + \
                 float(c.get("machine_count", 0) or 0) * float(c.get("tpm_per_machine", 0) or 0)
         return cap
+
 
     def _check_peak_feasibility(self, clusters, peak_demand, vendor_cap) -> dict:
         """成案终检：逐模型 自建(调整后)+三方 是否覆盖客户波形峰值。slack<0 即按波形跑会掉量。"""
@@ -261,12 +418,41 @@ class TimePeriodSolver(SolverEconomicsMixin):
     def _servable_clusters(self, demand: DemandSnapshotItem, clusters: list[dict]) -> list[dict]:
         return self._matching_clusters(demand.model_name, clusters, demand.customer_code)
 
+    def _slot_minutes(self, timeline: list[str]) -> dict[str, float]:
+        parsed: list[tuple[str, datetime]] = []
+        for ts in timeline:
+            try:
+                parsed.append((ts, datetime.fromisoformat(str(ts))))
+            except (TypeError, ValueError):
+                continue
+        if not parsed:
+            return {ts: 60.0 for ts in timeline}
+
+        parsed.sort(key=lambda item: item[1])
+        durations: dict[str, float] = {}
+        for idx, (ts, dt) in enumerate(parsed):
+            if idx + 1 < len(parsed):
+                minutes = (parsed[idx + 1][1] - dt).total_seconds() / 60.0
+            elif idx > 0:
+                minutes = (dt - parsed[idx - 1][1]).total_seconds() / 60.0
+            else:
+                minutes = 60.0
+            durations[ts] = minutes if minutes > 0 else 60.0
+        return {ts: durations.get(ts, 60.0) for ts in timeline}
+
+    def _tpm_revenue(self, tpm: float, unit_revenue: float, minutes: float) -> float:
+        return tpm * max(minutes, 0.0) / 1_000_000.0 * unit_revenue
+
     def _machine_area(self, cand, rate, timeline) -> float:
-        """一台 `rate` 产能的机器全时段服务该客户能产出的自建收入「面积」（gross，covered=0）：
-        density × Σ_t min(rate, 需求(t))。用于按“每机器面积”比较机会成本，而非按空闲台数或每 TPM 密度。
-        —— 速率不同的集群间，一台机器的价值 = 速率 × 密度 × 有效时点数，这里直接积分出来。"""
+
+        """一台 `rate` 产能的机器全时段服务该客户能产出的自建收入积分。"""
         series = self._series_of(cand.demand, timeline)
-        return cand.unit_self_revenue * sum(min(rate, max(tpm, 0.0)) for _, tpm in series)
+        slot_minutes = self._slot_minutes(timeline)
+        return sum(
+            self._tpm_revenue(min(rate, max(tpm, 0.0)), cand.unit_self_revenue, slot_minutes.get(ts, 60.0))
+            for ts, tpm in series
+        )
+
 
     def _plan_reallocation(self, candidates, clusters, rejected, timeline, min_self_required):
         """机器一次重分配：仅当某模型**满容量**不足以覆盖其需求时，才从别处搬空闲机器过来。
@@ -291,9 +477,11 @@ class TimePeriodSolver(SolverEconomicsMixin):
         self_cap_model = self._self_cap_by_model(clusters)
         model_slack = {m: max(0.0, self_cap_model.get(m, 0.0) - min_self_required.get(m, 0.0))
                        for m in self_cap_model}
-        # 每集群名义可供出台数 = 机器数 − 最小保留台数（KSCC 等）；真正上限再由 model_slack 约束。
-        donatable = {c["cluster_name"]: max(0, int(c.get("machine_count", 0) or 0) - self._min_reserve_machines(c))
+        # 每集群名义可供出台数 = 机器数 − 最小保留台数（KSCC 等）；专属集群机器锁定不外借；真正上限再由 model_slack 约束。
+        donatable = {c["cluster_name"]: (0 if c.get("dedicated")
+                                         else max(0, int(c.get("machine_count", 0) or 0) - self._min_reserve_machines(c)))
                      for c in clusters}
+
         # 每集群「可服务的全部候选」（机会成本用：一台机器留在源集群能承接哪些客户的面积）
         servable_by_cluster: dict[str, list] = {}
         for cand in candidates:
@@ -395,6 +583,8 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 break
             # 仅当目标每机器增益 > 源机会成本才搬（相等/更低都不搬，杜绝无谓或降面积挪动）
             if target_gain - opportunity(src) <= EPS:
+
+
                 break  # sources 已按机会成本升序，后续只会更贵，直接停
             name = src["cluster_name"]
             src_rate = float(src.get("tpm_per_machine", 0) or 0)
@@ -449,7 +639,10 @@ class TimePeriodSolver(SolverEconomicsMixin):
         names = [c["cluster_name"] for c in clusters]
 
         def donatable(name):
+            if by_name[name].get("dedicated"):
+                return 0  # 专属集群机器锁定，不参与跨模型腾挪
             return int(by_name[name].get("machine_count", 0) or 0) - self._min_reserve_machines(by_name[name])
+
 
         def total_self_revenue():
             wm, _ = self._compute_watermarks(candidates, clusters, timeline)
@@ -465,8 +658,11 @@ class TimePeriodSolver(SolverEconomicsMixin):
         def legal(src, tgt):
             if src == tgt or donatable(src) < 1:
                 return False
+            if by_name[tgt].get("dedicated"):
+                return False  # 专属集群不接收外来机器
             if model_of[src] == model_of[tgt] and rate_of[src] < rate_of[tgt] - EPS:
                 return False  # 禁同模型 rate 套利
+
             if src in received or tgt in donated:
                 return False  # 反洗产能：一台机器只搬一次
             return True
@@ -489,9 +685,10 @@ class TimePeriodSolver(SolverEconomicsMixin):
                     rev = total_self_revenue()[0] if ok else float("-inf")
                     by_name[s]["machine_count"] += 1
                     by_name[t]["machine_count"] -= 1
-                    if ok and rev - cur_rev > EPS and (best is None or rev > best[2]):
+                    if ok and rev - cur_rev > REV_EPS and (best is None or rev > best[2]):
                         best = (s, t, rev)
-            if best is None or best[2] - cur_rev <= EPS:
+            if best is None or best[2] - cur_rev <= REV_EPS:
+
                 break
             s, t, rev = best
             by_name[s]["machine_count"] -= 1
@@ -613,10 +810,13 @@ class TimePeriodSolver(SolverEconomicsMixin):
             }
             capped: set[str] = set()  # 已封顶（到峰值）或所在集群已无容量的客户
 
+            slot_minutes = self._slot_minutes(timeline)
+
             def time_above(rid, lv):
-                return sum(1 for _, tpm in series[rid] if tpm > lv + EPS)
+                return sum(slot_minutes.get(ts, 60.0) for ts, tpm in series[rid] if tpm > lv + EPS)
 
             def next_breakpoint(rid, lv):
+
                 for bp in breakpoints[rid]:
                     if bp > lv + EPS:
                         return min(bp, peak[rid])
@@ -628,9 +828,13 @@ class TimePeriodSolver(SolverEconomicsMixin):
                     rid = c.demand.report_id
                     if rid in capped or level[rid] >= peak[rid] - EPS:
                         continue
-                    marginal = unit[rid] * time_above(rid, level[rid])  # 边际收入 = 密度 × 时点数
-                    if marginal > best_marginal + EPS:
+                    marginal = unit[rid] * time_above(rid, level[rid]) / 1_000_000.0
+
+                    if marginal > best_marginal + REV_EPS:
                         best_marginal, best_rid = marginal, rid
+
+
+
                 if best_rid is None:
                     break
                 target_level = next_breakpoint(best_rid, level[best_rid])
@@ -645,14 +849,44 @@ class TimePeriodSolver(SolverEconomicsMixin):
                     kept.append(c)
         return watermarks, kept
 
+    def _before_self_revenue(self, considered, clusters, timeline, machines_before) -> dict:
+        """现状自建收入基线，按「挪机器前」的关注集群产能逐时点封顶。
+
+        现状自建量 = 现状自建占比 × 拟合波形；直接积分会超过集群物理产能（尤其忙时峰值），
+        使 after 恒低于 before 出现假性亏损。这里用 machines_before 的产能、按 _draw（尊重
+        _matching_clusters 的模型匹配与专属集群归属）逐时点为各客户现状自建量封顶后再积分。
+        高单价客户优先占用产能。"""
+        slot_minutes = self._slot_minutes(timeline)
+        order = sorted(considered, key=lambda c: -c.unit_self_revenue)
+        series_of = {c.demand.report_id: dict(self._series_of(c.demand, timeline)) for c in considered}
+        rate_of = {cc["cluster_name"]: float(cc.get("tpm_per_machine", 0) or 0) for cc in clusters}
+        total_rev = 0.0
+        total_int = 0.0
+        for ts in timeline:
+            # 每时点重置为挪机器前的满产能（现状口径）
+            cap_ts = {name: int(machines_before.get(name, 0) or 0) * rate_of.get(name, 0.0)
+                      for name in rate_of}
+            minutes = slot_minutes.get(ts, 60.0)
+            for c in order:
+                tpm_t = series_of[c.demand.report_id].get(ts, 0.0)
+                desired = tpm_t * c.demand.current_self_ratio
+                if desired <= 0:
+                    continue
+                got = self._draw(c.demand, clusters, cap_ts, desired)
+                total_rev += self._tpm_revenue(got, c.unit_self_revenue, minutes)
+                total_int += got * minutes
+        return {"self_revenue": total_rev, "self_tpm_integral": total_int}
+
     def _integrate(self, accepted, watermarks, timeline, adjust: bool):
         """时序积分：水位线固定，逐时点 self(t)=min(需求(t), 水位线)；三方=需求−自建。
         分发占比随时间变化仅因客户跑量变化。adjust=False 用调整前的当前占比作对照基线。"""
         self_revenue = 0.0
         self_tpm_integral = 0.0
+        slot_minutes = self._slot_minutes(timeline)
         wm_out: list[dict] = []
         for c in accepted:
             rid = c.demand.report_id
+
             unit = c.unit_self_revenue
             level = watermarks.get(rid, 0.0)           # 固定水位线（自建TPM上限）
             series = self._series_of(c.demand, timeline)
@@ -664,8 +898,10 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 else:
                     self_t = tpm_t * c.demand.current_self_ratio   # 调整前：当前占比
                 vendor_t = max(tpm_t - self_t, 0.0)
-                self_revenue += self_t * unit
-                self_tpm_integral += self_t
+                minutes = slot_minutes.get(ts, 60.0)
+                self_revenue += self._tpm_revenue(self_t, unit, minutes)
+                self_tpm_integral += self_t * minutes
+
                 if adjust:
                     ratio = (self_t / tpm_t) if tpm_t > 0 else 0.0
                     slots.append({
@@ -673,7 +909,9 @@ class TimePeriodSolver(SolverEconomicsMixin):
                         "self_tpm": self_t, "vendor_tpm": vendor_t,
                         "vendor_ratios": {(c.best_vendor or {}).get("vendor", "vendor"): round(1 - ratio, 4)},
                     })
-                    cust_gain += (self_t - tpm_t * c.demand.current_self_ratio) * unit
+                    before_self_t = tpm_t * c.demand.current_self_ratio
+                    cust_gain += self._tpm_revenue(self_t - before_self_t, unit, minutes)
+
             if adjust and (level > EPS or c.demand.current_self_ratio > EPS):
                 # 只对"有自建 or 曾有自建"的客户产出水位变更；wm=0 且从未自建的纯空转客户跳过。
                 wm_out.append({

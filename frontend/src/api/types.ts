@@ -72,6 +72,7 @@ export interface Policy extends BaseEntity {
   policy_run_id: number;
   policy_no: string;
   algorithm: string;
+  scenario: string;
   summary_json: Record<string, unknown>;
   expected_revenue_gain: number;
   expected_peak_shaving_gain: number;

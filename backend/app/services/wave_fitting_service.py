@@ -234,24 +234,28 @@ class WaveFittingService:
         return [(ts, acc[ts] / 60.0) for ts in sorted(acc)]
 
     # ---------- 供求解消费 ----------
-    def build_fitted_series(self, ai_consumer: str, model_name: str) -> list[tuple[str, float]]:
-        """合并该客户(ai_consumer)+模型最新的 闲时+忙时 客户级拟合波形为一条整段序列（升序）。
+    def build_fitted_series(self, ai_consumer: str, model_name: str,
+                            period: str | None = None) -> list[tuple[str, float]]:
+        """读取该客户(ai_consumer)+模型最新客户级拟合波形。
 
-        无任何拟合结果时返回 []，调用方据此回退原始序列。
+        period 为 idle/busy 时只取对应时段；未指定时合并闲忙时。无任何拟合结果时返回 []，
+        调用方据此回退原始序列。
         """
+        periods = (period,) if period in WavePeriod.ALL else (WavePeriod.IDLE, WavePeriod.BUSY)
         merged: dict[str, float] = {}
-        for period in (WavePeriod.IDLE, WavePeriod.BUSY):
+        for wave_period in periods:
             res = self.result_repo.latest_for(
                 level=FitLevel.CUSTOMER,
                 ai_consumer=ai_consumer,
                 model_name=model_name,
-                period=period,
+                period=wave_period,
             )
             if res is None:
                 continue
             for ts, tpm in (res.series_json or []):
                 merged[ts] = float(tpm)
         return [(ts, merged[ts]) for ts in sorted(merged)]
+
 
 
 # 默认算法目录（主数据）：首次启动幂等 seed 到 fitting_algorithms 表。
