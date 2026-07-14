@@ -1264,6 +1264,51 @@
   border-radius: 999px;
   flex: 0 0 auto;
 }
+/* 集群拟合波形：可悬停的图例，每项显示该集群「当前小时」的拟合值 */
+.fit-cluster-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding-top: 10px;
+  color: #b8d5e0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.fit-cluster-legend-hint {
+  width: 100%;
+  color: #6f8a98;
+  font-size: 11px;
+}
+.fit-cluster-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(82, 191, 255, .18);
+  background: rgba(39, 215, 255, .05);
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+  min-width: 0;
+}
+.fit-cluster-legend-item:hover,
+.fit-cluster-legend-item.is-active {
+  background: rgba(39, 215, 255, .16);
+  border-color: rgba(82, 191, 255, .5);
+  color: #e6f7ff;
+}
+.fit-cluster-legend-item i {
+  width: 14px;
+  height: 3px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+.fit-cluster-legend-item em {
+  font-style: normal;
+  font-weight: 600;
+  color: #27d7ff;
+  margin-left: 2px;
+}
 .customer-watermark-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

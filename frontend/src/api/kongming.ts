@@ -125,7 +125,7 @@ export const jobsApi = {
 
 export const watchedClustersApi = {
   list: (includeDisabled = false): Promise<WatchedCluster[]> => apiClient.get('/api/v1/watched-clusters', { include_disabled: includeDisabled }),
-  create: (body: { cluster_name: string; enabled?: boolean; sort_order?: number }): Promise<WatchedCluster> => apiClient.post('/api/v1/watched-clusters', body),
+  create: (body: { cluster_name: string; enabled?: boolean; sort_order?: number; deployed_model?: string | null }): Promise<WatchedCluster> => apiClient.post('/api/v1/watched-clusters', body),
   patch: (id: number, body: Partial<WatchedCluster>): Promise<WatchedCluster> => apiClient.patch(`/api/v1/watched-clusters/${id}`, body),
   delete: (id: number): Promise<{ deleted: number }> => apiClient.delete(`/api/v1/watched-clusters/${id}`),
 };

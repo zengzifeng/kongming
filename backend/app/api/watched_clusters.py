@@ -15,12 +15,14 @@ class WatchedClusterCreate(BaseModel):
     cluster_name: str = Field(min_length=1, max_length=128)
     enabled: bool = True
     sort_order: int | None = Field(default=None, ge=0)
+    deployed_model: str | None = Field(default=None, max_length=64)
 
 
 class WatchedClusterPatch(BaseModel):
     cluster_name: str | None = Field(default=None, min_length=1, max_length=128)
     enabled: bool | None = None
     sort_order: int | None = Field(default=None, ge=0)
+    deployed_model: str | None = Field(default=None, max_length=64)
 
 
 @bp.get("/watched-clusters")

@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from ..extensions import db
 from ..models import WatchedCluster
 from ..utils.errors import NotFound, StateConflict, ValidationFailed
+from ..utils.model_name import normalize_model_name
 
 
 DEFAULT_WATCHED_CLUSTERS = [
@@ -45,6 +46,7 @@ class WatchedClusterService:
             cluster_name=name,
             enabled=bool(payload.get("enabled", True)),
             sort_order=self._normalize_order(payload.get("sort_order"), self._next_order()),
+            deployed_model=self._normalize_deployed_model(payload.get("deployed_model")),
         )
         db.session.add(cluster)
         db.session.commit()
@@ -60,6 +62,8 @@ class WatchedClusterService:
             cluster.enabled = bool(patch["enabled"])
         if "sort_order" in patch and patch["sort_order"] is not None:
             cluster.sort_order = self._normalize_order(patch["sort_order"], cluster.sort_order)
+        if "deployed_model" in patch:
+            cluster.deployed_model = self._normalize_deployed_model(patch["deployed_model"])
         db.session.commit()
         return cluster
 
@@ -94,6 +98,11 @@ class WatchedClusterService:
         if order < 0:
             raise ValidationFailed("排序值不能小于 0")
         return order
+
+    @staticmethod
+    def _normalize_deployed_model(value) -> str | None:
+        """部署模型规范化为小写规范形（与需求/客户跑量的 model_name 一致）；空值返回 None。"""
+        return normalize_model_name(value) or None
 
     @staticmethod
     def _next_order() -> int:

@@ -40,6 +40,25 @@ NEW_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "policies": [
         ("demand_id", "INTEGER"),
     ],
+    "watched_clusters": [
+        ("deployed_model", "VARCHAR(64)"),
+    ],
+}
+
+
+# 重点集群 -> 部署模型 映射（小写规范形，与需求/客户跑量的 model_name 一致）。
+# 拟合叠加按此把「模型级叠加波形」归属到对应集群。仅回填 deployed_model 为空的行，
+# 不覆盖人工已设置的值；若该集群尚未在 watched_clusters，则补一条。
+WATCHED_DEPLOYED_MODEL_MAP: dict[str, str] = {
+    "DeepSeek-V3.2": "deepseek-v3.2",
+    "GLM-5.1-FP8": "glm-5.1",
+    "GLM-5.1-KSCC": "glm-5.1",
+    "GLM-5.1-XISHANJU": "glm-5.1",
+    "GLM-5.2": "glm-5.2",
+    "GLM-5.2-Tencent": "glm-5.2",
+    "GLM-5.2-KSCC": "glm-5.2",
+    "Kimi-K2.5-NVFP4-MIHAYOU": "kimi-k2.5",
+    "Kimi-K2.6-MIHAYOU": "kimi-k2.6",
 }
 
 
@@ -88,7 +107,68 @@ def _dedupe_customer_fitting_configs(conn) -> None:
     print(f"[index] 已创建唯一索引 {index_name}。")
 
 
+def _backfill_watched_deployed_model(conn) -> None:
+    """回填 watched_clusters.deployed_model：仅填空值、补缺失集群，幂等。"""
+    if not _table_exists(conn, "watched_clusters"):
+        print("[skip] watched_clusters 表不存在，跳过部署模型回填。")
+        return
+    have = _existing_columns(conn, "watched_clusters")
+    if "deployed_model" not in have:
+        print("[skip] watched_clusters.deployed_model 列尚未创建，跳过回填。")
+        return
+    updated = 0
+    for name, dm in WATCHED_DEPLOYED_MODEL_MAP.items():
+        res = conn.execute(text(
+            "UPDATE watched_clusters SET deployed_model = :dm "
+            "WHERE lower(cluster_name) = lower(:name) AND deployed_model IS NULL"
+        ), {"dm": dm, "name": name})
+        updated += res.rowcount or 0
+        exists = conn.execute(text(
+            "SELECT 1 FROM watched_clusters WHERE lower(cluster_name) = lower(:name)"
+        ), {"name": name}).fetchone()
+        if not exists:
+            next_order = conn.execute(text(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM watched_clusters"
+            )).scalar()
+            conn.execute(text(
+                "INSERT INTO watched_clusters "
+                "(cluster_name, enabled, sort_order, deployed_model, created_at, updated_at) "
+                "VALUES (:name, 1, :order, :dm, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ), {"name": name, "order": next_order, "dm": dm})
+            print(f"[add ] watched_clusters 新增 {name}（部署模型 {dm}，sort_order {next_order}）")
+    print(f"[backfill] watched_clusters.deployed_model 回填 {updated} 行。")
+
+
+def _pre_alter_watched_deployed_model(config_name: str) -> None:
+    """create_app 会触发 ensure_default_watched_clusters 查询 WatchedCluster（含新列），
+    必须先用裸连接把 deployed_model 列建出来，否则 create_app 即崩。仅 sqlite 文件库需要。"""
+    import sqlite3
+    from app.config import CONFIG_MAP
+    uri = CONFIG_MAP[config_name].SQLALCHEMY_DATABASE_URI
+    if not uri.startswith("sqlite:///"):
+        return
+    db_path = uri[len("sqlite:///"):]
+    if db_path == ":memory:":
+        return
+    con = sqlite3.connect(db_path)
+    try:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "watched_clusters" not in tables:
+            return
+        cols = {r[1] for r in con.execute("PRAGMA table_info(watched_clusters)").fetchall()}
+        if "deployed_model" in cols:
+            return
+        con.execute("ALTER TABLE watched_clusters ADD COLUMN deployed_model VARCHAR(64)")
+        con.commit()
+        print(f"[pre ] watched_clusters.deployed_model 已预建（create_app 前）。")
+    finally:
+        con.close()
+
+
 def run(config_name: str = "dev") -> None:
+    _pre_alter_watched_deployed_model(config_name)
     app = create_app(config_name)
     with app.app_context():
         # 1. 建缺失的新表（model_list_prices 等）
@@ -109,6 +189,7 @@ def run(config_name: str = "dev") -> None:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
                     print(f"[add ] {table}.{name}  ->  {ddl}")
             _dedupe_customer_fitting_configs(conn)
+            _backfill_watched_deployed_model(conn)
 
         print("迁移完成。")
 

@@ -364,6 +364,7 @@ export interface WatchedCluster extends BaseEntity {
   cluster_name: string;
   enabled: boolean;
   sort_order: number;
+  deployed_model?: string | null;
 }
 
 export interface JobSchedule extends BaseEntity {

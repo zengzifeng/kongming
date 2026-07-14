@@ -2,7 +2,7 @@ import { Button, DatePicker, Form, InputNumber, message, Select } from 'antd';
 
 import { CheckOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
@@ -124,7 +124,12 @@ interface RuntimeLineChartProps {
   yDomain: [number, number];
   yTicks: number[];
   yFormatter: (value: number) => string;
+  tooltipFormatter?: (value: number) => string;
+  // tooltip 只渲染这一条线（选中某集群后悬浮只显示该集群的值）；为空时显示全部线。
+  tooltipSingleKey?: string | null;
   selectedLineKey?: string | null;
+  hoveredLineKey?: string | null;
+  legendRenderer?: () => ReactNode;
   referenceLines?: ChartReferenceLine[];
   onLineClick?: (key: string) => void;
   forceSolidLines?: boolean;
@@ -151,7 +156,7 @@ interface CapacityBarShapeProps {
 }
 
 
-const chartColors = ['#27d7ff', '#5dffb2', '#f5d54b', '#9b8cff', '#ff8ab3', '#6aa7ff'];
+const chartColors = ['#27d7ff', '#5dffb2', '#f5d54b', '#9b8cff', '#ff8ab3', '#6aa7ff', '#ff6b6b', '#42d4f4', '#c19a6b'];
 const defaultConsumerTpmRange = (): [Dayjs, Dayjs] => [dayjs().startOf('day'), dayjs().endOf('day')];
 const emptyConsumerTpmOptions = (): ConsumerTpmFilterOptions => ({ aiModels: [], aiConsumers: [], customerCodes: [] });
 
@@ -328,23 +333,38 @@ function buildShareRuntime(items: ConsumerTpmSnapshot[]) {
 }
 
 function buildFittingChart(results: FittingResult[]) {
-  const selected = results.slice(0, 6);
+  // 结果按 generated_at 倒序，按集群去重取首条（即最新批次），避免多次跑拟合产生重复线；
+  // 不再 slice(0,6) 截断，展示全部 watched 集群。
+  const byCluster = new Map<string, FittingResult>();
+  results.forEach((item) => {
+    const key = item.cluster_name || item.ai_consumer || item.model_name;
+    if (key && !byCluster.has(key)) byCluster.set(key, item);
+  });
+  const selected = Array.from(byCluster.values());
   const lines = selected.map((item, index) => ({
     key: `fit${index}`,
     name: item.cluster_name || item.ai_consumer || item.model_name,
     color: chartColors[index % chartColors.length],
     strokeDasharray: index === 2 ? '5 5' : undefined,
   }));
-  const rows: Array<Record<string, number | string>> = [];
+  // 按时间标签合并：并集所有集群的时间戳，缺值补 0，保证各线 X 轴对齐、不丢时段
+  // （旧版按 pointIndex 对齐，集群点数不一致时会错位丢点，如忙时 Kimi-K2.6 仅 1 点）。
+  const byTime = new Map<string, Record<string, number | string>>();
+  // 每个集群各整点拟合值（用于"当前小时"取数）：lineKey -> { 'HH:00': tpm }
+  const hourlyByLine: Record<string, Record<string, number>> = {};
   selected.forEach((result, resultIndex) => {
     const key = `fit${resultIndex}`;
-    (result.series_json || []).forEach(([ts, value], pointIndex) => {
-      const row = rows[pointIndex] || { time: timeLabel(ts) };
+    hourlyByLine[key] = {};
+    (result.series_json || []).forEach(([ts, value]) => {
+      const time = timeLabel(ts);
+      const row = byTime.get(time) || { time };
       row[key] = Number(value || 0);
-      rows[pointIndex] = row;
+      byTime.set(time, row);
+      hourlyByLine[key][time] = Number(value || 0);
     });
   });
-  return { data: rows, lines, yDomain: chartDomain(rows, lines), yTicks: chartTicks(rows, lines) };
+  const rows = Array.from(byTime.values()).sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  return { data: rows, lines, yDomain: chartDomain(rows, lines), yTicks: chartTicks(rows, lines), hourlyByLine };
 }
 
 function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnapshot[]): CustomerFitWave[] {
@@ -355,22 +375,27 @@ function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnap
     byModel.set(result.model_name, items);
   });
   return Array.from(byModel.entries()).map(([model, modelResults]) => {
-    const selected = modelResults.slice(0, 6);
+    // 不再 slice(0,6)：展示该模型下全部客户（如 glm-5.2 有 8 个客户）。
+    const selected = modelResults;
     const lines = selected.map((result, index) => ({
       key: `customer${index}`,
       name: result.ai_consumer || result.cluster_name || result.model_name,
       color: chartColors[index % chartColors.length],
       strokeDasharray: index === 2 ? '5 5' : undefined,
     }));
-    const data: Array<Record<string, number | string>> = [];
+    // 按时间标签合并：并集各客户时间戳、缺值补 0，保证各线 X 轴对齐、不丢时段
+    // （旧版按 pointIndex 对齐，客户点数不一致时会错位）。
+    const byTime = new Map<string, Record<string, number | string>>();
     selected.forEach((result, resultIndex) => {
       const key = `customer${resultIndex}`;
-      (result.series_json || []).forEach(([ts, value], pointIndex) => {
-        const row = data[pointIndex] || { time: timeLabel(ts) };
+      (result.series_json || []).forEach(([ts, value]) => {
+        const time = timeLabel(ts);
+        const row = byTime.get(time) || { time };
         row[key] = Number(value || 0);
-        data[pointIndex] = row;
+        byTime.set(time, row);
       });
     });
+    const data = Array.from(byTime.values()).sort((a, b) => String(a.time).localeCompare(String(b.time)));
     const dispatchRatios = selected.map((result, index) => {
       const current = ratios.find((item) => item.ai_model === result.model_name && item.ai_consumer === result.ai_consumer);
       const selfRatio = Number(current?.self_ratio || 0);
@@ -390,6 +415,15 @@ function formatTpm(value: number) {
   if (value >= 1000000) return `${Number((value / 1000000).toFixed(1))} Mil`;
   if (value >= 1000) return `${Number((value / 1000).toFixed(0))} K`;
   return String(value);
+}
+
+// 集群拟合波形专用：以 Mil(百万TPM) 为单位、保留 1 位小数。
+function formatTpmMillionsAxis(value: number) {
+  return (value / 1000000).toFixed(1);
+}
+
+function formatTpmMillionsTip(value: number) {
+  return `${(value / 1000000).toFixed(1)} Mil`;
 }
 
 function formatPercentAxis(value: number) {
@@ -510,8 +544,11 @@ function CapacityBarShape({ x = 0, y = 0, width = 0, height = 0, payload }: Capa
   );
 }
 
-function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yFormatter, selectedLineKey, referenceLines, onLineClick, forceSolidLines }: RuntimeLineChartProps) {
-
+function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yFormatter, tooltipFormatter, tooltipSingleKey, selectedLineKey, hoveredLineKey, legendRenderer, referenceLines, onLineClick, forceSolidLines }: RuntimeLineChartProps) {
+  // 选中或悬停的线优先高亮，其余变暗；悬停优先级高于选中。
+  const focusKey = hoveredLineKey ?? selectedLineKey ?? null;
+  // tooltip 只显示单条线时，预解析该线的名称/颜色。
+  const singleLine = tooltipSingleKey ? lines.find((l) => l.key === tooltipSingleKey) : null;
   return (
     <div className="realtime-chart-card">
       <div className="realtime-chart-title">{title}</div>
@@ -519,15 +556,39 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 10, bottom: 0, left: -2 }}>
             <CartesianGrid stroke="rgba(82, 191, 255, .12)" strokeDasharray="3 3" />
-            <XAxis dataKey="time" axisLine={false} tickLine={false} minTickGap={12} tick={{ fill: '#7898a7', fontSize: 11 }} />
+            <XAxis dataKey="time" axisLine={false} tickLine={false} minTickGap={12} interval={data.length <= 12 ? 0 : 'preserveStartEnd'} tick={{ fill: '#7898a7', fontSize: 11 }} />
             <YAxis width={44} domain={yDomain} ticks={yTicks} tickFormatter={(value) => yFormatter(Number(value))} axisLine={false} tickLine={false} tick={{ fill: '#7898a7', fontSize: 11 }} />
-            <Tooltip contentStyle={{ background: '#071018', border: '1px solid rgba(82, 191, 255, .28)', borderRadius: 8 }} labelStyle={{ color: '#e6f7ff' }} />
+            <Tooltip
+              contentStyle={{ background: '#071018', border: '1px solid rgba(82, 191, 255, .28)', borderRadius: 8 }}
+              labelStyle={{ color: '#e6f7ff' }}
+              formatter={tooltipFormatter ? (value) => tooltipFormatter(Number(value)) : undefined}
+              // 选中某集群后悬浮只显示该集群：按 tooltipSingleKey 过滤掉其余线。
+              itemSorter={(item) => (tooltipSingleKey && item.dataKey === tooltipSingleKey ? -1 : 1)}
+              wrapperStyle={tooltipSingleKey ? { visibility: 'visible' } : undefined}
+              // 自定义渲染：只保留 tooltipSingleKey 对应的一条。
+              content={tooltipSingleKey && singleLine ? (props) => {
+                const { label, payload } = props as { label?: string; payload?: Array<{ dataKey?: string; value?: number | string }> };
+                const hit = payload?.find((p) => p.dataKey === tooltipSingleKey);
+                const raw = hit ? Number(hit.value ?? 0) : 0;
+                const text = tooltipFormatter ? tooltipFormatter(raw) : String(raw);
+                return (
+                  <div style={{ background: '#071018', border: '1px solid rgba(82, 191, 255, .28)', borderRadius: 8, padding: '6px 10px', fontSize: 12 }}>
+                    <div style={{ color: '#e6f7ff', marginBottom: 2 }}>{label}</div>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#b8d5e0' }}>
+                      <i style={{ width: 12, height: 3, borderRadius: 999, background: singleLine.color, display: 'inline-block' }} />
+                      {singleLine.name}: <strong style={{ color: singleLine.color }}>{text}</strong>
+                    </div>
+                  </div>
+                );
+              } : undefined}
+            />
             {referenceLines?.map((line) => (
               <ReferenceLine key={line.key} y={line.value} stroke={line.color} strokeDasharray={line.strokeDasharray || '6 6'} strokeOpacity={0.45} strokeWidth={2} ifOverflow="extendDomain" />
             ))}
             {lines.map((line) => {
               const isSelected = selectedLineKey === line.key;
-              const isDimmed = Boolean(selectedLineKey && !isSelected);
+              const isHovered = hoveredLineKey === line.key;
+              const isDimmed = Boolean(focusKey && focusKey !== line.key);
               return (
                 <Line
                   key={line.key}
@@ -535,9 +596,9 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
                   dataKey={line.key}
                   name={line.name}
                   stroke={line.color}
-                  strokeWidth={isSelected ? 2.6 : 2}
+                  strokeWidth={isSelected || isHovered ? 2.6 : 2}
                   strokeDasharray={forceSolidLines ? undefined : line.strokeDasharray}
-                  strokeOpacity={isDimmed ? 0.38 : 1}
+                  strokeOpacity={isDimmed ? 0.28 : 1}
 
                   dot={false}
                   activeDot={onLineClick ? { r: 4, onClick: () => onLineClick(line.key) } : false}
@@ -550,7 +611,7 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
           </LineChart>
         </ResponsiveContainer>
       </div>
-      {summary ? (
+      {legendRenderer ? legendRenderer() : summary ? (
 
         <div className="realtime-chart-summary">
           <span />
@@ -597,6 +658,7 @@ export function RealtimeDashboard() {
   const [selectedFitModel, setSelectedFitModel] = useState('');
 
   const [selectedCustomerKey, setSelectedCustomerKey] = useState<string | null>(null);
+  const [hoveredClusterFitKey, setHoveredClusterFitKey] = useState<string | null>(null);
 
   const vendorMetrics = useMemo(() => buildVendorMetrics(vendorRows), [vendorRows]);
   const modelRuntime = useMemo(() => buildModelRuntime(consumerSnapshots), [consumerSnapshots]);
@@ -972,18 +1034,56 @@ export function RealtimeDashboard() {
     const selectedWatermark = watermarks.find((item) => item.key === selectedCustomerKey) || null;
     const activeCustomerKey = selectedWatermark?.key || null;
 
+    // 取某集群在「当前小时」的拟合值：当前整点命中序列则直接取；否则取序列中与当前小时
+    // 距离最近的一点的值（如闲时序列 0-8 点、当前 14 点时回退到最近的 08:00）。
+    const currentHour = dayjs().format('HH:00');
+    const currentHourValue = (lineKey: string): number | null => {
+      const hourly = clusterFit.hourlyByLine?.[lineKey];
+      if (!hourly) return null;
+      if (hourly[currentHour] != null) return hourly[currentHour];
+      const times = Object.keys(hourly).sort();
+      if (!times.length) return null;
+      const idx = times.reduce((best, t, i) => (Math.abs(Number(t.slice(0, 2)) - Number(currentHour.slice(0, 2))) < Math.abs(Number(times[best].slice(0, 2)) - Number(currentHour.slice(0, 2))) ? i : best), 0);
+      return hourly[times[idx]];
+    };
+
     return (
       <div className="idle-fit-module-stack">
         <section className="wire-card realtime-panel realtime-runtime-panel idle-fit-panel">
 
           <div className="wire-card-title">集群拟合波形</div>
           <RuntimeLineChart
-            title={isBusy ? '忙时跑量预估（08:00-24:00）' : '闲时跑量预估'}
+            title={isBusy ? '忙时跑量预估（Mil，08:00-24:00）' : '闲时跑量预估（Mil）'}
             data={clusterFit.data}
             lines={clusterFit.lines}
             yDomain={clusterFit.yDomain}
             yTicks={clusterFit.yTicks}
-            yFormatter={formatTpm}
+            yFormatter={formatTpmMillionsAxis}
+            tooltipFormatter={formatTpmMillionsTip}
+            tooltipSingleKey={hoveredClusterFitKey}
+            hoveredLineKey={hoveredClusterFitKey}
+            onLineClick={(key) => setHoveredClusterFitKey((current) => (current === key ? null : key))}
+            legendRenderer={() => (
+              <div className="fit-cluster-legend">
+                <span className="fit-cluster-legend-hint">当前 {currentHour} · 选中集群后，悬浮折线只显示该集群的拟合值</span>
+                {clusterFit.lines.map((line) => {
+                  const val = currentHourValue(line.key);
+                  const isHovered = hoveredClusterFitKey === line.key;
+                  return (
+                    <span
+                      key={line.key}
+                      className={`fit-cluster-legend-item${isHovered ? ' is-active' : ''}`}
+                      onMouseEnter={() => setHoveredClusterFitKey(line.key)}
+                      onMouseLeave={() => setHoveredClusterFitKey(null)}
+                      onClick={() => setHoveredClusterFitKey((current) => (current === line.key ? null : line.key))}
+                    >
+                      <i style={{ backgroundColor: line.color }} />{line.name}
+                      <em>{val != null ? formatTpmMillionsTip(val) : '-'}</em>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
           />
 
         </section>
@@ -1013,6 +1113,7 @@ export function RealtimeDashboard() {
             yDomain={selectedCustomerFitWave.yDomain}
             yTicks={selectedCustomerFitWave.yTicks}
             yFormatter={formatTpm}
+            tooltipSingleKey={selectedCustomerKey}
             selectedLineKey={activeCustomerKey}
             referenceLines={selectedWatermark ? [{ key: `${selectedWatermark.key}-self-watermark`, name: `${selectedWatermark.name} 自建水位线`, color: selectedWatermark.color, value: selectedWatermark.selfWatermark, strokeDasharray: '6 6' }] : []}
             onLineClick={(key) => setSelectedCustomerKey((current) => (current === key ? null : key))}

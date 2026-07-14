@@ -66,7 +66,7 @@ class ResourceClient:
 
     def snapshot(self) -> ResourceSnapshot:
         from ..extensions import db
-        from ..models import ClusterCapacity, ClusterModelTpm, ProviderMapping
+        from ..models import ClusterCapacity, ClusterModelTpm, ProviderMapping, WatchedCluster
         from ..utils.model_name import normalize_model_name
         from ..utils.time import utcnow
 
@@ -96,6 +96,13 @@ class ResourceClient:
             if m.cluster_name:
                 prov.setdefault(m.cluster_name.lower(), m.provider)
 
+        # 重点集群显式配置的部署模型（小写规范形）；缺省回退 cluster_name 小写形。
+        watched_dm: dict[str, str] = {
+            (w.cluster_name or "").lower(): (w.deployed_model or "").strip().lower()
+            for w in db.session.execute(db.select(WatchedCluster)).scalars()
+            if w.deployed_model
+        }
+
         clusters: list[ClusterResourceItem] = []
         for name, r in latest.items():
             machine_count = int(r.node_count or 0)
@@ -105,7 +112,7 @@ class ResourceClient:
             redundant = max(total_cap - current, 0.0)
             clusters.append(ClusterResourceItem(
                 cluster_name=name,
-                deployed_model=normalize_model_name(name),  # 与需求 model 同为小写规范形，供按模型匹配/聚合
+                deployed_model=normalize_model_name(watched_dm.get(name.lower()) or name),  # 优先 watched 配置，否则回退集群名小写形
                 provider=prov.get(name.lower()),
                 machine_count=machine_count,
                 tpm_per_machine=rate,
