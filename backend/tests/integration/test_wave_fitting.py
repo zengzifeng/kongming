@@ -51,21 +51,21 @@ def test_algorithms_readonly_no_post_route(client):
 
 # ---- 客户关联配置增改查 ----
 def test_config_create_and_list(client):
-    payload = {"ai_consumer": "客户A", "model_name": "glm-5.1",
+    payload = {"customer_code": "C0200", "model_name": "glm-5.1",
                "period": "busy", "algo_name": "demo",
                "params_json": {"delta_tpm": 5.0}}
     res = client.post("/api/v1/fittings/configs", json=payload)
     assert res.status_code == 200, res.json
     cfg_id = res.json["data"]["id"]
 
-    res = client.get("/api/v1/fittings/configs?ai_consumer=客户A")
+    res = client.get("/api/v1/fittings/configs?customer_code=C0200")
     assert res.status_code == 200
     assert len(res.json["data"]) == 1
     assert res.json["data"][0]["id"] == cfg_id
 
 
 def test_config_upsert_is_idempotent_on_consumer_model(client):
-    payload = {"ai_consumer": "客户A", "model_name": "glm-5.1",
+    payload = {"customer_code": "C0200", "model_name": "glm-5.1",
                "period": "busy", "algo_name": "demo"}
     r1 = client.post("/api/v1/fittings/configs", json=payload)
     r2 = client.post("/api/v1/fittings/configs",
@@ -73,13 +73,13 @@ def test_config_upsert_is_idempotent_on_consumer_model(client):
     assert r1.json["data"]["id"] == r2.json["data"]["id"]  # 同客户+模型，更新非新增
     assert r2.json["data"]["params_json"]["delta_tpm"] == 9.0
 
-    res = client.get("/api/v1/fittings/configs?ai_consumer=客户A")
+    res = client.get("/api/v1/fittings/configs?customer_code=C0200")
     assert res.status_code == 200
     assert len(res.json["data"]) == 1
 
 
 def test_config_patch(client):
-    payload = {"ai_consumer": "客户A", "model_name": "glm-5.1",
+    payload = {"customer_code": "C0200", "model_name": "glm-5.1",
                "period": "idle", "algo_name": "demo"}
     cfg_id = client.post("/api/v1/fittings/configs", json=payload).json["data"]["id"]
     res = client.patch(f"/api/v1/fittings/configs/{cfg_id}", json={"enabled": False})
@@ -89,14 +89,14 @@ def test_config_patch(client):
 
 def test_config_rejects_unknown_algo(client):
     res = client.post("/api/v1/fittings/configs", json={
-        "ai_consumer": "客户A", "model_name": "glm-5.1",
+        "customer_code": "C0200", "model_name": "glm-5.1",
         "period": "busy", "algo_name": "does-not-exist"})
     assert res.status_code == 400, res.json
 
 
 def test_config_rejects_bad_period(client):
     res = client.post("/api/v1/fittings/configs", json={
-        "ai_consumer": "客户A", "model_name": "glm-5.1",
+        "customer_code": "C0200", "model_name": "glm-5.1",
         "period": "midday", "algo_name": "demo"})
     assert res.status_code == 400, res.json
 
@@ -105,7 +105,7 @@ def test_config_rejects_bad_period(client):
 def test_run_fitting_produces_customer_and_cluster_results(client, app):
     _seed_usage(app)
     client.post("/api/v1/fittings/configs", json={
-        "ai_consumer": "客户A", "model_name": "glm-5.1",
+        "customer_code": "C0200", "model_name": "glm-5.1",
         "period": "busy", "algo_name": "demo"})
 
     res = client.post("/api/v1/fittings/run")
@@ -127,7 +127,7 @@ def test_run_fitting_produces_customer_and_cluster_results(client, app):
 def test_run_fitting_delta_applied(client, app):
     _seed_usage(app)
     client.post("/api/v1/fittings/configs", json={
-        "ai_consumer": "客户A", "model_name": "glm-5.1",
+        "customer_code": "C0200", "model_name": "glm-5.1",
         "period": "busy", "algo_name": "demo", "params_json": {"delta_tpm": 6.0}})
     client.post("/api/v1/fittings/run")
     res = client.get("/api/v1/fittings/results?level=customer&period=busy")
@@ -141,10 +141,10 @@ def test_build_fitted_series_merges_periods(app):
 
     _seed_usage(app)
     svc = WaveFittingService()
-    svc.upsert_config({"ai_consumer": "客户A", "model_name": "glm-5.1",
+    svc.upsert_config({"customer_code": "C0200", "model_name": "glm-5.1",
                        "period": "busy", "algo_name": "demo"})
     svc.run_fitting()
-    merged = svc.build_fitted_series("客户A", "glm-5.1")
+    merged = svc.build_fitted_series("C0200", "glm-5.1")
     # 闲时(3点 tpm10) + 忙时(10点 tpm20) 合并为两点整段序列
     assert len(merged) == 2
     tpms = sorted(t for _, t in merged)

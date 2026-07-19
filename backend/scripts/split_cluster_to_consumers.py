@@ -1,4 +1,10 @@
-"""按「集群(模型)↔客户」关联，把集群波形拆分到客户维度写入 consumer_model_tpm。
+"""[已过时] 按「集群(模型)↔客户」关联，把集群波形拆分到客户维度写入 consumer_model_tpm。
+
+⚠ 已由「per-user_id 直接采集」流程取代：monitor_consumers 改为 customer_code(user_id) 唯一、
+一行一 uid 后，run_collection 直接按 user_id 逐客户拉取真实跑量写入 consumer_model_tpm，
+不再需要从集群产能经 provider_mappings 反推客户量。本脚本的 `code_by_consumer` 单值假设
+（一个 ai_consumer 一个 customer_code）在多 uid 下已失效，强行运行会产生错挂的 company 级行。
+仅当无法逐 uid 采集、且接受 company 级近似时才可参考，运行前请人工确认。
 
 关联来源：provider_mappings.cluster_name ↔ cluster_model_tpm.cluster_name（大小写不敏感）。
 拆分规则：

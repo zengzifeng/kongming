@@ -108,10 +108,20 @@ class ResourceMonitorClient:
         self.timeout = timeout
 
     def fetch(self, metrics: list[str] | None = None, model: str | None = None,
-              ai_consumer: str | None = None, start_time: str | None = None,
+              user_id: str | None = None, start_time: str | None = None,
               end_time: str | None = None) -> dict:
+        """请求资源模型监控数据。
+
+        - metrics: 指定监控项，以重复参数名 ``metrics`` 传递；为空返回全部。
+        - model: 模型名筛选，同时作用于 token 服务的 ``inference_model`` 与 kingress
+          服务的 ``ai_model`` 标签（推荐）。
+        - user_id: 仅 kingress 指标有效，对应 Prometheus ``ai_consumer`` 标签的 user_id
+          部分（标签格式 ``<account>:<user_id>``），用于逐客户过滤。线上实测 ``ai_consumer``
+          参数会被接口忽略，逐客户只能用 ``user_id``。
+        - start_time/end_time: ``YYYY-MM-DD HH:MM:SS``，默认最近 1 小时。
+        """
         if self.mode == "mock":
-            return _mock_envelope(metrics=metrics, ai_consumer=ai_consumer,
+            return _mock_envelope(metrics=metrics, user_id=user_id,
                                   start_time=start_time, end_time=end_time)
         if not self.base_url:
             raise IntegrationError("监控接口 base_url 未配置", code="INTEGRATION_FAILED")
@@ -121,8 +131,8 @@ class ResourceMonitorClient:
             params.append(("metrics", mt))
         if model:
             params.append(("model", model))
-        if ai_consumer:
-            params.append(("ai_consumer", ai_consumer))
+        if user_id:
+            params.append(("user_id", user_id))
         if start_time:
             params.append(("start_time", start_time))
         if end_time:
@@ -142,10 +152,15 @@ class ResourceMonitorClient:
             raise IntegrationError(f"监控接口返回非 JSON: {exc}", code="INTEGRATION_FAILED")
 
 
-def _mock_envelope(metrics: list[str] | None, ai_consumer: str | None,
+def _mock_envelope(metrics: list[str] | None, user_id: str | None,
                    start_time: str | None, end_time: str | None) -> dict:
-    """合成一个信封：token 侧给全局产能；kingress 侧仅当带 ai_consumer 时给量，
-    否则（全局）也给量。用于本地/测试，形状与真实接口一致（含 series 可空）。"""
+    """合成一个信封：token 侧给全局产能；kingress 侧给按 ai_model 的量。
+
+    用于本地/测试，形状与真实接口一致（含 series 可空）。mock 不按 user_id 过滤——
+    无论全局（user_id=None）还是逐客户（user_id 非空）都返回 kingress 量，以模拟
+    「逐客户拉取成功」的理想路径，便于跑通采集/落库链路（真实逐客户是否返回数据
+    取决于 user_id 是否为接口侧有效值）。
+    """
     want = set(metrics) if metrics else set(MONITOR_METRICS)
     times = ["2026-01-01 00:00:00", "2026-01-01 00:01:00"]
 

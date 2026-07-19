@@ -23,7 +23,7 @@ class MonitorCollectRequest(BaseModel):
 
 class ConsumerCreateRequest(BaseModel):
     ai_consumer: str = Field(min_length=1, max_length=128)
-    customer_code: str | None = Field(default=None, max_length=64)
+    customer_code: str = Field(min_length=1, max_length=64)  # user_id，自然主键，必填
     customer_name: str | None = Field(default=None, max_length=128)
     note: str | None = Field(default=None, max_length=512)
 
@@ -78,11 +78,11 @@ def add_consumer():
     return success(model_to_dict(consumer), status=201)
 
 
-@bp.delete("/monitor/consumers/<ai_consumer>")
-def remove_consumer(ai_consumer: str):
+@bp.delete("/monitor/consumers/<customer_code>")
+def remove_consumer(customer_code: str):
     hard = request.args.get("hard", "").lower() in ("1", "true", "yes")
-    ResourceMonitorService().remove_consumer(ai_consumer, hard=hard)
-    return success({"ai_consumer": ai_consumer, "hard": hard})
+    ResourceMonitorService().remove_consumer(customer_code, hard=hard)
+    return success({"customer_code": customer_code, "hard": hard})
 
 
 # ---------------- 最新快照查询 ----------------
@@ -158,7 +158,7 @@ def latest_consumer_tpm():
     if not (start_time or end_time):
         latest: dict[tuple, ConsumerModelTpm] = {}
         for r in rows:
-            latest[(r.ai_consumer, r.ai_model)] = r
+            latest[(r.customer_code, r.ai_model)] = r  # per-user_id：按 customer_code 去重取最后一点
         rows = list(latest.values())
 
     return success({

@@ -25,12 +25,15 @@ GLOBAL_AI_CONSUMER = "__all__"
 
 
 def consumer_model_pairs():
-    """有跑量的 (ai_consumer, model) 组合；排除 __all__（全局汇总，非单客户）。"""
+    """有跑量的 (customer_code, model) 组合；排除 __all__（全局汇总，非单客户）。
+
+    per-user_id 粒度：customer_code(user_id) 为客户标识，同一 ai_consumer 多 uid 各算一组。
+    """
     rows = db.session.query(
-        distinct(MonitorConsumer.ai_consumer), CustomerUsageHourly.model
+        distinct(MonitorConsumer.customer_code), CustomerUsageHourly.model
     ).join(
         MonitorConsumer, MonitorConsumer.id == CustomerUsageHourly.customer_id
-    ).filter(MonitorConsumer.ai_consumer != GLOBAL_AI_CONSUMER).all()
+    ).filter(MonitorConsumer.customer_code != GLOBAL_AI_CONSUMER).all()
     return sorted(set(rows))
 
 
@@ -39,11 +42,11 @@ def main():
     with app.app_context():
         svc = WaveFittingService()
         pairs = consumer_model_pairs()
-        print(f"客户(ai_consumer)+模型组合 {len(pairs)} 个，各生成 忙时/闲时 demo 配置")
-        for ai_consumer, model in pairs:
+        print(f"客户(customer_code)+模型组合 {len(pairs)} 个，各生成 忙时/闲时 demo 配置")
+        for customer_code, model in pairs:
             for period in (WavePeriod.BUSY, WavePeriod.IDLE):
                 svc.upsert_config({
-                    "ai_consumer": ai_consumer,
+                    "customer_code": customer_code,
                     "model_name": model,
                     "period": period,
                     "algo_name": ALGO,

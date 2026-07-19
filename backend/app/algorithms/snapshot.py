@@ -220,19 +220,11 @@ def _apply_fitted_series(demand_items, period: str | None = None) -> None:
     if not current_app.config.get("WAVE_FIT_ENABLED", False):
         return
     from ..services.wave_fitting_service import WaveFittingService
-    from ..extensions import db
-    from ..models import MonitorConsumer
 
-    # 需求项按 customer_code 标识，拟合按 ai_consumer 标识：建 code->ai_consumer 映射。
-    consumer_by_code = {
-        c.customer_code: c.ai_consumer
-        for c in db.session.execute(db.select(MonitorConsumer)).scalars()
-        if c.customer_code
-    }
+    # 需求项与拟合结果均按 customer_code(user_id) 标识，直接取用，无需 code->ai_consumer 映射。
     svc = WaveFittingService()
     for item in demand_items:
-        ai_consumer = consumer_by_code.get(item.customer_code, item.customer_code)
-        fitted = svc.build_fitted_series(ai_consumer, item.model_name, period=period)
+        fitted = svc.build_fitted_series(item.customer_code, item.model_name, period=period)
 
         if fitted:
             item.tpm_series = fitted

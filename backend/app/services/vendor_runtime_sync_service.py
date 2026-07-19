@@ -56,7 +56,7 @@ class VendorRuntimeSyncService:
             db.select(ConsumerModelTpm)
             .where(ConsumerModelTpm.batch_id == batch_id)
             .order_by(
-                ConsumerModelTpm.ai_consumer.asc(),
+                ConsumerModelTpm.customer_code.asc(),
                 ConsumerModelTpm.ai_model.asc(),
                 ConsumerModelTpm.data_time.asc(),
                 ConsumerModelTpm.id.asc(),
@@ -65,7 +65,7 @@ class VendorRuntimeSyncService:
 
         latest: dict[tuple[str, str], ConsumerModelTpm] = {}
         for row in rows:
-            latest[(row.ai_consumer, row.ai_model)] = row
+            latest[(row.customer_code, row.ai_model)] = row  # per-user_id 去重取最后一点
 
         by_model: dict[str, float] = defaultdict(float)
         for row in latest.values():

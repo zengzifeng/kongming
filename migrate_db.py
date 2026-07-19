@@ -86,23 +86,26 @@ def _index_exists(conn, index: str) -> bool:
 def _dedupe_customer_fitting_configs(conn) -> None:
     if not _table_exists(conn, "customer_fitting_configs"):
         return
-    result = conn.execute(text("""
+    # 列名已由 ai_consumer 改为 customer_code（per-user_id 改造）；旧库可能仍是 ai_consumer，兼容两种。
+    cols = _existing_columns(conn, "customer_fitting_configs")
+    key_col = "customer_code" if "customer_code" in cols else "ai_consumer"
+    result = conn.execute(text(f"""
         DELETE FROM customer_fitting_configs
         WHERE id NOT IN (
             SELECT MIN(id)
             FROM customer_fitting_configs
-            GROUP BY ai_consumer, model_name
+            GROUP BY {key_col}, model_name
         )
     """))
     print(f"[dedupe] customer_fitting_configs 删除重复行 {result.rowcount} 条。")
 
-    index_name = "uq_customer_fitting_consumer_model"
+    index_name = "uq_customer_fitting_natural_key"
     if _index_exists(conn, index_name):
         print(f"[skip] 索引 {index_name} 已存在。")
         return
     conn.execute(text(
-        "CREATE UNIQUE INDEX uq_customer_fitting_consumer_model "
-        "ON customer_fitting_configs (ai_consumer, model_name)"
+        f"CREATE UNIQUE INDEX {index_name} "
+        f"ON customer_fitting_configs ({key_col}, model_name)"
     ))
     print(f"[index] 已创建唯一索引 {index_name}。")
 

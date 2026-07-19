@@ -50,13 +50,13 @@ class CustomerFittingConfig(BaseModel):
     __tablename__ = "customer_fitting_configs"
     __table_args__ = (
         UniqueConstraint(
-            "ai_consumer", "model_name",
+            "customer_code", "model_name",
             name="uq_customer_fitting_natural_key",
         ),
-        Index("ix_customer_fitting_consumer_model", "ai_consumer", "model_name"),
+        Index("ix_customer_fitting_consumer_model", "customer_code", "model_name"),
     )
 
-    ai_consumer: Mapped[str] = mapped_column(String(128), nullable=False)
+    customer_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     model_name: Mapped[str] = mapped_column(String(64), nullable=False)
     period: Mapped[str] = mapped_column(String(16), nullable=False)  # idle / busy
     algo_name: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -67,7 +67,7 @@ class CustomerFittingConfig(BaseModel):
 class FittingResult(BaseModel):
     """一次拟合产出的目标时段波形（落库，可审计/复用/被求解流程消费）。
 
-    level=customer：单客户(ai_consumer)+模型+时段的拟合波形，algo_name 为该配置的拟合算法；
+    level=customer：单客户(customer_code)+模型+时段的拟合波形，algo_name 为该配置的拟合算法；
     level=cluster ：同一 deployed_model 下所有客户拟合波形按时间戳叠加后的集群波形，
                     是聚合结果、无拟合算法，algo_name 为 NULL。
     series_json：[[timestamp_iso, tpm], ...] 目标时段波形序列。
@@ -75,12 +75,12 @@ class FittingResult(BaseModel):
 
     __tablename__ = "fitting_results"
     __table_args__ = (
-        Index("ix_fitting_result_lookup", "level", "ai_consumer", "model_name", "period"),
+        Index("ix_fitting_result_lookup", "level", "customer_code", "model_name", "period"),
         Index("ix_fitting_result_cluster", "level", "cluster_name", "model_name", "period"),
     )
 
     level: Mapped[str] = mapped_column(String(16), nullable=False)  # customer / cluster
-    ai_consumer: Mapped[str | None] = mapped_column(String(128), index=True)
+    customer_code: Mapped[str | None] = mapped_column(String(64), index=True)
     cluster_name: Mapped[str | None] = mapped_column(String(64))
     model_name: Mapped[str] = mapped_column(String(64), nullable=False)
     period: Mapped[str] = mapped_column(String(16), nullable=False)  # idle / busy

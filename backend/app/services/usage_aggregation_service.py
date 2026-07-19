@@ -54,14 +54,16 @@ class UsageAggregationService:
 
         groups: dict[tuple[str, str], list[ConsumerModelTpm]] = {}
         for r in rows:
-            groups.setdefault((r.ai_consumer, r.ai_model), []).append(r)
+            groups.setdefault((r.customer_code, r.ai_model), []).append(r)
 
         provider_index = self._provider_index()
         consumer_cache: dict[str, MonitorConsumer] = {}
         written = 0
-        for (ai_consumer, ai_model), pts in groups.items():
-            consumer = self._resolve_consumer(ai_consumer, consumer_cache)
-            customer_name = consumer.customer_name or ai_consumer
+        for (customer_code, ai_model), pts in groups.items():
+            consumer = self._resolve_consumer(customer_code, consumer_cache)
+            if consumer is None:
+                continue  # 该 user_id 不在 monitor_consumers（数据缺口），跳过避免悬空 customer_id
+            customer_name = consumer.customer_name or consumer.ai_consumer
 
             total = sum(int(p.tpm or 0) for p in pts)  # 小时总量（自建+三方）
             if total <= 0:
@@ -115,23 +117,19 @@ class UsageAggregationService:
         return "", SELF_SOURCE
 
     @staticmethod
-    def _resolve_consumer(ai_consumer: str, cache: dict[str, MonitorConsumer]) -> MonitorConsumer:
-        if ai_consumer in cache:
-            return cache[ai_consumer]
+    def _resolve_consumer(customer_code: str,
+                           cache: dict[str, MonitorConsumer]) -> MonitorConsumer | None:
+        """按 customer_code(user_id) 解析客户。customer_code 现为 NOT NULL UNIQUE 自然主键，
+        不再自动建档（避免无 user_id 的脏行）；未在册返回 None，由调用方跳过。__all__ 需预录入。
+        """
+        if customer_code in cache:
+            return cache[customer_code]
         consumer = db.session.execute(
-            select(MonitorConsumer).where(MonitorConsumer.ai_consumer == ai_consumer)
+            select(MonitorConsumer).where(MonitorConsumer.customer_code == customer_code)
         ).scalar_one_or_none()
         if consumer is None:
-            # 缺失则建档：__all__ 作为「全客户汇总」的特殊客户，默认不参与逐客户采集。
-            consumer = MonitorConsumer(
-                ai_consumer=ai_consumer,
-                customer_name=ai_consumer,
-                level="B",
-                enabled=ai_consumer != GLOBAL_AI_CONSUMER,
-            )
-            db.session.add(consumer)
-            db.session.flush()
-        cache[ai_consumer] = consumer
+            return None
+        cache[customer_code] = consumer
         return consumer
 
     @staticmethod

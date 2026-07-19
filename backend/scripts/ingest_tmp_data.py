@@ -1,10 +1,11 @@
-"""录入 tmp_data 下的监控数据（1hr.json=__all__ 全局，consumer_*.json=按 ai_consumer），
+"""录入 tmp_data 下的监控数据（1hr.json=__all__ 全局，consumer_*.json=按 customer_code），
 并按整点小时聚合写入 customer_usage_hourly。
 
 - token 侧（集群产能，全局，与客户无关）只从 1hr.json 录一次 -> cluster_model_tpm + gpu_node_count
-- kingress 侧：1hr.json -> consumer_model_tpm(ai_consumer="__all__")；
-  每个 consumer_*.json 若含 kingress 数据，则以文件名中的客户名为 ai_consumer 录入。
-- 聚合：对数据窗口内每个整点小时跑 UsageAggregationService.aggregate_hourly。
+- kingress 侧：1hr.json -> consumer_model_tpm(ai_consumer="__all__", customer_code="__all__")；
+  每个 consumer_{customer_code}.json 若含 kingress 数据，则以文件名中的 customer_code(user_id)
+  录入，ai_consumer(客户名) 由 monitor_consumers 反查。
+- 聚合：对数据窗口内每个整点小时跑 UsageAggregationService.aggregate_hourly（per-user_id 粒度）。
 
 用法（backend 目录下）：
     python scripts/ingest_tmp_data.py
@@ -70,22 +71,30 @@ def ingest(batch: MonitorBatch) -> tuple[int, int, list[str]]:
         batch.window_end = _parse_time(all_parsed.end_time)
     cluster_rows = svc._persist_token_side(batch, all_parsed)
     consumer_rows = svc._persist_consumer_side(
-        batch, SimpleNamespace(ai_consumer=GLOBAL_AI_CONSUMER, customer_code=None), all_parsed)
+        batch, SimpleNamespace(ai_consumer=GLOBAL_AI_CONSUMER, customer_code=GLOBAL_AI_CONSUMER),
+        all_parsed)
     db.session.commit()
 
     # 2) 逐个 consumer 文件：仅当含 kingress 数据时按客户名录入
     ingested_consumers: list[str] = []
     empty_consumers: list[str] = []
+    # 文件名 consumer_{customer_code}.json -> _consumer_name 得 customer_code(user_id)。
+    # ai_consumer(客户名) 由 monitor_consumers 反查；缺失则用 customer_code 兜底显示。
+    name_by_code = {
+        c.customer_code: (c.ai_consumer or c.customer_code)
+        for c in db.session.query(MonitorConsumer).all()
+    }
     for path in sorted(DATA_DIR.glob("consumer_*.json")):
-        name = _consumer_name(path)
+        customer_code = _consumer_name(path)
         parsed = parse_envelope(json.loads(path.read_text(encoding="utf-8")))
         if not _has_kingress(parsed):
-            empty_consumers.append(name)
+            empty_consumers.append(customer_code)
             continue
+        ai_consumer = name_by_code.get(customer_code, customer_code)
         n = svc._persist_consumer_side(
-            batch, SimpleNamespace(ai_consumer=name, customer_code=None), parsed)
+            batch, SimpleNamespace(ai_consumer=ai_consumer, customer_code=customer_code), parsed)
         consumer_rows += n
-        ingested_consumers.append(f"{name}({n})")
+        ingested_consumers.append(f"{ai_consumer}/{customer_code}({n})")
         db.session.commit()
 
     if empty_consumers:

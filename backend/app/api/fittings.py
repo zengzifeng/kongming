@@ -12,7 +12,7 @@ bp = Blueprint("fittings", __name__)
 
 
 class FittingConfigCreate(BaseModel):
-    ai_consumer: str = Field(min_length=1, max_length=128)
+    customer_code: str = Field(min_length=1, max_length=64)  # user_id，自然主键
     model_name: str = Field(min_length=1, max_length=64)
     period: str = Field(pattern="^(idle|busy)$")
     algo_name: str = Field(min_length=1, max_length=64)
@@ -38,7 +38,7 @@ def list_algorithms():
 @bp.get("/fittings/configs")
 def list_configs():
     items = WaveFittingService().list_configs(
-        ai_consumer=request.args.get("ai_consumer"),
+        customer_code=request.args.get("customer_code"),
         model_name=request.args.get("model_name"),
         period=request.args.get("period"),
     )
@@ -77,7 +77,7 @@ def run_fitting():
 def list_results():
     items, total = WaveFittingService().result_repo.list(
         level=request.args.get("level"),
-        ai_consumer=request.args.get("ai_consumer"),
+        customer_code=request.args.get("customer_code"),
         model_name=request.args.get("model_name"),
         period=request.args.get("period"),
         page=int(request.args.get("page", 1)),

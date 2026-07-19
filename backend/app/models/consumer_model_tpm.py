@@ -6,26 +6,28 @@ from .base import BaseModel
 
 
 class ConsumerModelTpm(BaseModel):
-    """kingress 侧客户瞬时跑量快照（每分钟 × 客户 × 售卖模型）。
+    """kingress 侧客户瞬时跑量快照（每分钟 × 客户(user_id) × 售卖模型）。
 
     瞬时 TPM 口径（不是累计 token —— 累计 token 属收益计算）。客户由采集时请求的
-    ai_consumer 标定（写入 ai_consumer/customer_code），售卖模型取 series.labels.ai_model。
-    自建/第三方占比、平均输入输出 token、缓存命中率随同一时间点一并落库，供切量策略消费。
+    user_id(customer_code) 标定，客户名(ai_consumer/customer_name) 冗余便于追溯；售卖模型
+    取 series.labels.ai_model。自建/第三方占比、平均输入输出 token、缓存命中率随同一时间点
+    一并落库，供切量策略消费。一行 = (batch, customer_code, ai_model, data_time)。
     """
 
     __tablename__ = "consumer_model_tpm"
     __table_args__ = (
-        UniqueConstraint("batch_id", "ai_consumer", "ai_model", "data_time",
+        # 唯一键含 customer_code：同一 ai_consumer(客户名) 多 user_id 各自一行，按 user_id 区分。
+        UniqueConstraint("batch_id", "customer_code", "ai_model", "data_time",
                          name="uq_consumer_model_tpm"),
-        Index("ix_consumer_model_tpm_consumer_time", "ai_consumer", "data_time"),
+        Index("ix_consumer_model_tpm_consumer_time", "customer_code", "data_time"),
         Index("ix_consumer_model_tpm_model_time", "ai_model", "data_time"),
     )
 
     batch_id: Mapped[int] = mapped_column(ForeignKey("monitor_batches.id"), nullable=False, index=True)
     data_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
-    ai_consumer: Mapped[str] = mapped_column(String(128), nullable=False)  # 采集时的消费者标识
-    customer_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    ai_consumer: Mapped[str] = mapped_column(String(128), nullable=False)  # 采集时的客户名(公司名)
+    customer_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user_id
     ai_model: Mapped[str] = mapped_column(String(64), nullable=False)      # 售卖模型名
 
     tpm: Mapped[float] = mapped_column(Numeric(20, 2), default=0)                 # kingress_model_tpm
