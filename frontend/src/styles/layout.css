@@ -1067,6 +1067,18 @@
   --resource-bg-2: rgba(42, 29, 11, .38);
   --resource-border: rgba(255, 179, 71, .22);
 }
+.resource-section-info {
+  --resource-accent: var(--km-cyan);
+  --resource-bg-1: rgba(39, 215, 255, .1);
+  --resource-bg-2: rgba(8, 27, 44, .42);
+  --resource-border: rgba(39, 215, 255, .22);
+}
+.resource-section-runtime {
+  --resource-accent: var(--km-green);
+  --resource-bg-1: rgba(93, 255, 178, .09);
+  --resource-bg-2: rgba(7, 34, 28, .42);
+  --resource-border: rgba(93, 255, 178, .2);
+}
 .resource-section-title {
   display: flex;
   align-items: center;
@@ -1092,6 +1104,9 @@
   align-items: stretch;
 }
 .resource-section-grid .realtime-panel { min-height: 520px; }
+.resource-info-grid {
+  grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+}
 .resource-section .wire-card::before {
   background: var(--resource-accent);
   opacity: .1;
@@ -1410,6 +1425,13 @@
 .realtime-filter-grid .ant-input,
 .realtime-filter-grid .ant-picker {
   width: 100% !important;
+}
+.realtime-filter-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .realtime-chart-stack { display: grid; gap: 14px; }
 .realtime-chart-card {

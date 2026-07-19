@@ -96,6 +96,7 @@ class SolverEconomicsMixin:
         return {
             "report_id": demand.report_id,
             "customer_code": demand.customer_code,
+            "customer_name": getattr(demand, "customer_name", ""),
             "model": demand.model_name,
             "reason": reason,
         }

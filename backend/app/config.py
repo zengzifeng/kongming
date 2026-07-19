@@ -14,6 +14,12 @@ class BaseConfig:
         f"sqlite:///{INSTANCE_DIR / 'kongming.db'}",
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # SQLite：给驱动层设 30s 连接等待，配合 extensions 里的 busy_timeout/WAL 降低锁冲突。
+    SQLALCHEMY_ENGINE_OPTIONS = (
+        {"connect_args": {"timeout": 30}}
+        if SQLALCHEMY_DATABASE_URI.startswith("sqlite")
+        else {}
+    )
     JSON_SORT_KEYS = False
 
     SCHEDULER_ENABLED = True
@@ -51,6 +57,13 @@ class BaseConfig:
     )
     # 模型级供需再平衡：跨模型把富余机器挪给紧缺模型（仅满足峰值可承接 + 正收益 + 一台只搬一次）
     MODEL_REBALANCE_ENABLED = os.environ.get("KONGMING_MODEL_REBALANCE", "1") == "1"
+    # 固定档位客户（按 monitor_consumers.customer_name 匹配，其全部 uid 生效）：
+    # 只计入峰值可行性（自建+三方容量需覆盖其峰值），但不参与水位线优化，按当前自建/三方占比承载不动。
+    TIME_PERIOD_FIXED_PROFILE_CONSUMERS = tuple(
+        n for n in os.environ.get(
+            "KONGMING_FIXED_PROFILE_CONSUMERS", "北京金山云网络技术有限公司",
+        ).split(",") if n
+    )
 
     # ---- 波形拟合(wave fitting)口径 ----
     # 忙时 = 9-24（包左不包右，即 9..23）；闲时 = 其 24 小时补集 = 0..8。所有客户共用此全局边界。
@@ -77,6 +90,8 @@ class TestConfig(BaseConfig):
     SELF_PROVIDER_WHITELIST_ENABLED = False
     EXCLUDE_CUSTOMER_CODES = ()
     MODEL_REBALANCE_ENABLED = False
+    # 固定档位客户默认空：既有 time_period 用例不受扰动；需要时用例内显式注入 params。
+    TIME_PERIOD_FIXED_PROFILE_CONSUMERS = ()
     # 拟合接入求解默认关闭，既有 time_period 用例仍消费原始 tpm_series，不受扰动。
     WAVE_FIT_ENABLED = False
     # 监控接口固定走 mock，避免测试触网。

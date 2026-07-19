@@ -193,10 +193,28 @@ def build_run_snapshot(
         return build_snapshot(algorithm=algorithm, demands=demands, params=params)
 
 
-    demand_items = build_usage_demand_items()
+    # time_period 策略：需求 universe 限定为 customer_sell_discounts 表内出现过的 (客户,模型)。
+    demand_items = build_usage_demand_items(
+        period=params.get("module"),
+        restrict_to_sell_discount=(algorithm == "time_period"),
+    )
     if not demand_items:
         raise ValidationFailed("没有可用的实跑量需求用于测算")
     _apply_fitted_series(demand_items, params.get("module"))
+
+    # 固定档位客户：按 config 里的公司名解析出其全部 uid(customer_code)，注入 params 供 solver 使用。
+    # 这些客户只计入峰值可行性，不参与水位线优化（按当前自建/三方占比承载）。
+    if algorithm == "time_period" and "fixed_profile_codes" not in params:
+        from flask import current_app
+        from ..models import MonitorConsumer
+
+        fixed_names = tuple(current_app.config.get("TIME_PERIOD_FIXED_PROFILE_CONSUMERS", ()))
+        if fixed_names:
+            params["fixed_profile_codes"] = [
+                c.customer_code for c in db.session.execute(
+                    db.select(MonitorConsumer).where(MonitorConsumer.customer_name.in_(fixed_names))
+                ).scalars()
+            ]
 
     return build_snapshot(
         algorithm=algorithm,

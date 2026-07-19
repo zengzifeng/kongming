@@ -56,6 +56,27 @@ def test_time_period_gain_positive_and_machines_conserved():
     assert s["machines_total_before"] == s["machines_total_after"]
 
 
+def test_time_period_fixed_profile_excluded_from_watermark_but_counted_in_peak():
+    # 固定档位客户 cJS：不进候选、不设水位，但其峰值仍计入峰值可行性。
+    demands = [
+        _demand("opt", "c1", peak=150_000, self_ratio=0.2),
+        _demand("js", "cJS", peak=120_000, self_ratio=0.0),
+    ]
+    snap = _snapshot(demands)
+    snap.params["fixed_profile_codes"] = ["cJS"]
+    res = TimePeriodSolver().solve(snap)
+    s, d = res.summary, res.diagnostics
+    assert "cJS" not in {w["customer_code"] for w in s["watermark_changes"]}  # 无水位调整
+    assert "cJS" not in {a["customer_code"] for a in s["accepted_customers"]}  # 不进接纳集
+    assert d["fixed_profile_codes"] == ["cJS"]
+    peak_with = s["peak_feasibility"]["qwen2.5-72b"]["peak_demand"]
+
+    # 对照：cJS 完全不在需求里时峰值更小 → 证明固定档位客户确实计入了峰值可行性
+    res2 = TimePeriodSolver().solve(_snapshot([_demand("opt", "c1", peak=150_000, self_ratio=0.2)]))
+    peak_without = res2.summary["peak_feasibility"]["qwen2.5-72b"]["peak_demand"]
+    assert peak_with > peak_without
+
+
 def test_time_period_watermark_is_time_varying():
     # 峰值 400k 超过自建容量(4×50k=200k)，低谷 120k 在容量内 -> 低谷 self 占比应更高。
     # 仅给 qwen 单簇（无其它可跨模型腾挪的空闲机器），确保容量确实受限、峰值溢出到三方。

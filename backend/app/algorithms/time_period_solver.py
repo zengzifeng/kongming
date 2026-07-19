@@ -58,17 +58,26 @@ class TimePeriodSolver(SolverEconomicsMixin):
         vendors = snapshot.vendors
         timeline = self._timeline(snapshot.demands)
 
+        # 固定档位客户（如金山云）：只计入峰值可行性，不参与水位线优化——按当前自建/三方占比承载不动。
+        # 其全部 uid(customer_code) 由 build_run_snapshot 从 config 解析后注入 params.fixed_profile_codes。
+        # 注：当前这些客户自建占比≈0（全走三方），故不占用自建产能、无需为其预留容量；若将来固定档位
+        # 客户有非零自建，需在水位注水前按其当前自建量预留集群容量（此处暂不处理）。
+        fixed_codes = set(snapshot.params.get("fixed_profile_codes", []))
+        opt_demands = ([d for d in snapshot.demands if d.customer_code not in fixed_codes]
+                       if fixed_codes else snapshot.demands)
+
         # 峰值可行性硬约束基准：逐模型客户波形总需求峰值 / 三方额度 / 需保留的最小自建容量。
         # min_self_required = max(0, 峰值 − 三方额度)：三方接不住的那部分峰值必须由自建兜底，
         # 是「机器最多能挪走到什么程度」的物理下限（削峰可把峰值外抛给三方，但外抛不掉的必须留自建）。
+        # 峰值需求对**全体需求（含固定档位客户）**求和：固定档位客户的量也必须被自建+三方覆盖。
         peak_demand = self._peak_demand_by_model(snapshot.demands, timeline, clusters)
 
         vendor_cap = self._vendor_cap_by_model(vendors)
         min_self_required = {m: max(0.0, peak_demand.get(m, 0.0) - vendor_cap.get(m, 0.0))
                              for m in peak_demand}
 
-        # ---- A. 客户经济学（时间不变量）+ B. 需求时序剖面 ----
-        candidates, rejected = self._build_candidates(snapshot.demands, vendors, model_prices, timeline)
+        # ---- A. 客户经济学（时间不变量）+ B. 需求时序剖面 ----（固定档位客户不进候选，不设水位）
+        candidates, rejected = self._build_candidates(opt_demands, vendors, model_prices, timeline)
         candidates.sort(key=lambda c: c.score, reverse=True)
 
         # ---- C. 一次机器重分配：按“每机器边际收入面积”配齐（机会成本加权，不只按峰值台数）----
@@ -94,19 +103,9 @@ class TimePeriodSolver(SolverEconomicsMixin):
         machines_after = {c["cluster_name"]: int(c.get("machine_count", 0) or 0) for c in clusters}
         # 集群粒度聚合：同一 (源集群→目标集群, 模型) 的多次腾挪合并成一条，避免海量单机记录。
         node_moves = self._aggregate_node_moves(node_moves)
-        # 集群当前实跑/单机承载（腾挪不改变这两者，只改机器数），用于推导腾挪前后利用率。
-        cluster_meta = {
-            c["cluster_name"]: {
-                "current_tpm": float(c.get("current_tpm", 0) or 0),
-                "rate": float(c.get("tpm_per_machine", 0) or 0),
-            }
-            for c in clusters
-        }
-        self._enrich_move_utilization(node_moves, cluster_meta, machines_before, machines_after)
         # 模型级再平衡的 moves 同样聚合（报告/前端会读 summary.model_rebalance.moves）。
         if rebalance_diag.get("moves"):
             rebalance_diag["moves"] = self._aggregate_node_moves(rebalance_diag["moves"])
-            self._enrich_move_utilization(rebalance_diag["moves"], cluster_meta, machines_before, machines_after)
 
 
         # 成案终检：机器挪动后，逐模型「自建+三方」是否仍覆盖该模型客户波形峰值。
@@ -131,6 +130,15 @@ class TimePeriodSolver(SolverEconomicsMixin):
         revenue_gain = after["self_revenue"] - before["self_revenue"]
 
         accepted = kept                  # 汇总/约束里的 accepted 只列真正拿到自建的客户
+
+        # 腾挪前后利用率：用**本次方案规划的自建峰值**（水位注水后 after 的逐时自建量）而非当前监控自建量，
+        # 否则大部分需求当前在三方、监控自建≈0，利用率会失真为~0。口径=模型级：该模型规划自建峰值 /
+        # 该模型集群总容量（分别按腾挪前/后机器数）。
+        model_self_peak = self._model_self_peak(after, snapshot.demands, timeline)
+        self._enrich_move_utilization(node_moves, model_self_peak, clusters, machines_before, machines_after)
+        if rebalance_diag.get("moves"):
+            self._enrich_move_utilization(rebalance_diag["moves"], model_self_peak, clusters,
+                                          machines_before, machines_after)
 
         # ---- E. 约束体检 ----
         constraints = self._build_constraints(
@@ -163,9 +171,11 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 "model_self_capacity": model_self_capacity,
                 "peak_feasibility": feasibility,
                 "min_self_required": min_self_required,
+                "fixed_profile_codes": sorted(fixed_codes),
                 # 预警：三方侧亏损（售卖折扣<=采购折扣）的客户，供人工关注是否手动全挪自建
                 "must_move_customers": [
-                    {"report_id": c.demand.report_id, "customer_code": c.demand.customer_code}
+                    {"report_id": c.demand.report_id, "customer_code": c.demand.customer_code,
+                     "customer_name": c.demand.customer_name}
                     for c in candidates if c.must_move
                 ],
             },
@@ -263,26 +273,58 @@ class TimePeriodSolver(SolverEconomicsMixin):
         result.sort(key=lambda x: x["machine_count"], reverse=True)
         return result
 
+    def _model_self_peak(self, after: dict, demands: list, timeline: list[str]) -> dict[str, float]:
+        """本次方案规划的逐模型自建峰值 = 该模型**所有在自建上跑量的客户**自建量按时点叠加后取峰值。
+
+        含两类客户，避免漏算占着产能的存量自建：
+        - 进入水位优化的候选：取 after 里逐时规划自建量（slots.self_tpm）；
+        - 未进候选的需求（已全自建被拒 already_fully_self_hosted、固定档位客户等）：按其
+          current_self_ratio × 波形 计其既有自建量（这部分实打实占着集群产能）。
+        用「规划/既有自建量」而非「当前监控自建」算利用率，且不遗漏非候选的存量自建。
+        """
+        by_model_ts: dict[str, dict[str, float]] = {}
+        covered: set[str] = set()
+        for wm in after.get("watermarks", []):
+            covered.add(wm.get("report_id"))
+            m = str(wm.get("model", "")).lower()
+            for sl in wm.get("slots", []):
+                by_model_ts.setdefault(m, {}).setdefault(sl.get("ts"), 0.0)
+                by_model_ts[m][sl.get("ts")] += float(sl.get("self_tpm", 0) or 0)
+        # 未进水位优化、但当前有自建占比的需求：叠加其既有自建量（占着集群产能，必须计入利用率）
+        for d in demands:
+            if d.report_id in covered or d.current_self_ratio <= 0:
+                continue
+            m = (d.model_name or "").lower()
+            for ts, tpm in self._series_of(d, timeline):
+                by_model_ts.setdefault(m, {}).setdefault(ts, 0.0)
+                by_model_ts[m][ts] += float(tpm) * d.current_self_ratio
+        return {m: (max(v.values()) if v else 0.0) for m, v in by_model_ts.items()}
+
     @staticmethod
-    def _enrich_move_utilization(moves: list[dict], cluster_meta: dict[str, dict],
+    def _enrich_move_utilization(moves: list[dict], model_self_peak: dict[str, float],
+                                 clusters: list[dict],
                                  machines_before: dict[str, int],
                                  machines_after: dict[str, int]) -> None:
         """给每条腾挪记录补源/目标集群的腾挪前后利用率。
 
-        利用率 = 集群当前实跑 TPM / 集群总承载(机器数 × 单机承载)。当前实跑与单机承载
-        取自资源快照（cluster_model_tpm.tpm / cluster_capacities.tpm_per_machine），腾挪只改机器数。
-        总承载为 0（无机器/无单机承载）时利用率记 0。
+        利用率（模型级口径）= 该模型本次规划的自建峰值 / 该模型全部集群总承载(机器数 × 单机承载)。
+        分别用腾挪前(machines_before)、腾挪后(machines_after)的机器数算容量。总承载为 0 时记 0。
         """
-        def util(name: str, machines_map: dict[str, int]) -> float:
-            meta = cluster_meta.get(name)
-            if not meta:
+        model_of = {c["cluster_name"]: str(c.get("deployed_model", "")).lower() for c in clusters}
+        rate_of = {c["cluster_name"]: float(c.get("tpm_per_machine", 0) or 0) for c in clusters}
+        clusters_of_model: dict[str, list[str]] = {}
+        for c in clusters:
+            clusters_of_model.setdefault(str(c.get("deployed_model", "")).lower(), []).append(c["cluster_name"])
+
+        def util(cluster_name: str, machines_map: dict[str, int]) -> float:
+            model = model_of.get(cluster_name)
+            if model is None:
                 return 0.0
-            rate = float(meta.get("rate", 0) or 0)
-            machines = int(machines_map.get(name, 0) or 0)
-            capacity = machines * rate
-            if capacity <= 0:
+            cap = sum(int(machines_map.get(n, 0) or 0) * rate_of.get(n, 0.0)
+                      for n in clusters_of_model.get(model, []))
+            if cap <= 0:
                 return 0.0
-            return float(meta.get("current_tpm", 0) or 0) / capacity
+            return model_self_peak.get(model, 0.0) / cap
 
         for mv in moves:
             src = mv.get("from_cluster")
@@ -916,6 +958,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 # 只对"有自建 or 曾有自建"的客户产出水位变更；wm=0 且从未自建的纯空转客户跳过。
                 wm_out.append({
                     "report_id": rid, "customer_code": c.demand.customer_code,
+                    "customer_name": c.demand.customer_name,
                     "model": c.demand.model_name, "current_self_ratio": c.demand.current_self_ratio,
                     "watermark_self_tpm": level,        # 固定水位线（本次调整一次性设定）
                     "fallback_vendor": (c.best_vendor or {}).get("vendor"),
@@ -985,6 +1028,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
     def _accepted_row(self, c: _Candidate) -> dict:
         return {
             "report_id": c.demand.report_id, "customer_code": c.demand.customer_code,
+            "customer_name": c.demand.customer_name,
             "model": c.demand.model_name, "unit_self_revenue": c.unit_self_revenue,
             "peak_tpm": c.peak_tpm, "peak_vendor_gap": c.peak_vendor_gap,
             "must_move": c.must_move, "fallback_vendor": (c.best_vendor or {}).get("vendor"),

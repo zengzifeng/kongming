@@ -1,6 +1,6 @@
 import { Button, DatePicker, Form, InputNumber, message, Select } from 'antd';
 
-import { CheckOutlined } from '@ant-design/icons';
+import { CheckOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
@@ -664,18 +664,13 @@ function RuntimeLineChart({ title, data, lines, summary, yDomain, yTicks, yForma
   );
 }
 
-const resourceSections: Array<{ title: string; period: ResourcePeriod }> = [
-  { title: '实时资源', period: 'realtime' },
-  { title: '闲时资源', period: 'idle' },
-  { title: '忙时资源', period: 'busy' },
-];
-
 export function RealtimeDashboard() {
   const [selfHostedRows, setSelfHostedRows] = useState<SelfHostedClusterRow[]>([]);
   const [vendorRows, setVendorRows] = useState<VendorRuntimeRow[]>([]);
   const [consumerSnapshots, setConsumerSnapshots] = useState<ConsumerTpmSnapshot[]>([]);
   const [consumerTpmOptions, setConsumerTpmOptions] = useState<ConsumerTpmFilterOptions>(emptyConsumerTpmOptions);
-  const [consumerTpmFilters, setConsumerTpmFilters] = useState<ConsumerTpmFilters>({ range: defaultConsumerTpmRange() });
+  const [consumerTpmDraftFilters, setConsumerTpmDraftFilters] = useState<ConsumerTpmFilters>({ range: defaultConsumerTpmRange() });
+  const [consumerTpmQueryFilters, setConsumerTpmQueryFilters] = useState<ConsumerTpmFilters>({ range: defaultConsumerTpmRange() });
   const [idleClusterFits, setIdleClusterFits] = useState<FittingResult[]>([]);
   const [busyClusterFits, setBusyClusterFits] = useState<FittingResult[]>([]);
   const [idleCustomerFits, setIdleCustomerFits] = useState<FittingResult[]>([]);
@@ -695,6 +690,20 @@ export function RealtimeDashboard() {
   const busyClusterFit = useMemo(() => buildFittingChart(busyClusterFits), [busyClusterFits]);
   const idleCustomerFitWaves = useMemo(() => buildCustomerFitWaves(idleCustomerFits, consumerSnapshots), [idleCustomerFits, consumerSnapshots]);
   const busyCustomerFitWaves = useMemo(() => buildCustomerFitWaves(busyCustomerFits, consumerSnapshots), [busyCustomerFits, consumerSnapshots]);
+
+  const applyConsumerTpmFilters = () => {
+    setConsumerTpmQueryFilters({
+      ...consumerTpmDraftFilters,
+      range: consumerTpmDraftFilters.range ? [...consumerTpmDraftFilters.range] as [Dayjs, Dayjs] : null,
+    });
+  };
+
+  const resetConsumerTpmFilters = () => {
+    const range = defaultConsumerTpmRange();
+    const nextFilters: ConsumerTpmFilters = { range };
+    setConsumerTpmDraftFilters(nextFilters);
+    setConsumerTpmQueryFilters(nextFilters);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -740,11 +749,11 @@ export function RealtimeDashboard() {
 
   useEffect(() => {
     let cancelled = false;
-    const [start, end] = consumerTpmFilters.range || [];
+    const [start, end] = consumerTpmQueryFilters.range || [];
     monitorApi.consumerTpm({
-      ai_consumer: consumerTpmFilters.aiConsumer,
-      ai_model: consumerTpmFilters.aiModel,
-      customer_code: consumerTpmFilters.customerCode,
+      ai_consumer: consumerTpmQueryFilters.aiConsumer,
+      ai_model: consumerTpmQueryFilters.aiModel,
+      customer_code: consumerTpmQueryFilters.customerCode,
       start_time: start?.format('YYYY-MM-DDTHH:mm:ss'),
       end_time: end?.format('YYYY-MM-DDTHH:mm:ss'),
     }).then((data) => {
@@ -752,7 +761,7 @@ export function RealtimeDashboard() {
       setConsumerSnapshots(data.items || []);
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [consumerTpmFilters]);
+  }, [consumerTpmQueryFilters]);
 
   useEffect(() => {
     const nextModel = idleCustomerFitWaves[0]?.model || busyCustomerFitWaves[0]?.model || '';
@@ -949,8 +958,8 @@ export function RealtimeDashboard() {
         <Form.Item label="时间范围">
           <DatePicker.RangePicker
             showTime
-            value={consumerTpmFilters.range}
-            onChange={(range) => setConsumerTpmFilters((current) => ({ ...current, range: range as [Dayjs, Dayjs] | null }))}
+            value={consumerTpmDraftFilters.range}
+            onChange={(range) => setConsumerTpmDraftFilters((current) => ({ ...current, range: range as [Dayjs, Dayjs] | null }))}
           />
         </Form.Item>
         <Form.Item label="模型">
@@ -958,9 +967,9 @@ export function RealtimeDashboard() {
             allowClear
             showSearch
             placeholder="全部"
-            value={consumerTpmFilters.aiModel}
+            value={consumerTpmDraftFilters.aiModel}
             options={selectOptions(consumerTpmOptions.aiModels)}
-            onChange={(value) => setConsumerTpmFilters((current) => ({ ...current, aiModel: value }))}
+            onChange={(value) => setConsumerTpmDraftFilters((current) => ({ ...current, aiModel: value }))}
             style={{ minWidth: 180 }}
           />
         </Form.Item>
@@ -969,9 +978,9 @@ export function RealtimeDashboard() {
             allowClear
             showSearch
             placeholder="全部"
-            value={consumerTpmFilters.aiConsumer}
+            value={consumerTpmDraftFilters.aiConsumer}
             options={selectOptions(consumerTpmOptions.aiConsumers)}
-            onChange={(value) => setConsumerTpmFilters((current) => ({ ...current, aiConsumer: value }))}
+            onChange={(value) => setConsumerTpmDraftFilters((current) => ({ ...current, aiConsumer: value }))}
             style={{ minWidth: 180 }}
           />
         </Form.Item>
@@ -980,12 +989,16 @@ export function RealtimeDashboard() {
             allowClear
             showSearch
             placeholder="全部"
-            value={consumerTpmFilters.customerCode}
+            value={consumerTpmDraftFilters.customerCode}
             options={selectOptions(consumerTpmOptions.customerCodes)}
-            onChange={(value) => setConsumerTpmFilters((current) => ({ ...current, customerCode: value }))}
+            onChange={(value) => setConsumerTpmDraftFilters((current) => ({ ...current, customerCode: value }))}
             style={{ minWidth: 180 }}
           />
         </Form.Item>
+        <div className="realtime-filter-actions">
+          <Button type="primary" htmlType="button" icon={<SearchOutlined />} onClick={applyConsumerTpmFilters}>查询</Button>
+          <Button htmlType="button" icon={<ReloadOutlined />} onClick={resetConsumerTpmFilters}>重置</Button>
+        </div>
       </Form>
       <div className="realtime-chart-stack">
         <RuntimeLineChart
@@ -1157,18 +1170,23 @@ export function RealtimeDashboard() {
 
   return (
     <>
-      <PageHeader eyebrow="Resources" title="资源看板" description="按实时、闲时、忙时展示自建集群、三方供应商和客户模型跑量。" />
+      <PageHeader eyebrow="Resources" title="资源看板" description="资源信息与客户模型实时、闲时、忙时跑量拟合。" />
       <div className="resource-board page-section">
-        {resourceSections.map((section) => (
-          <section className={`resource-section resource-section-${section.period}`} key={section.title}>
-            <div className="resource-section-title">{section.title}</div>
-            <div className="realtime-board resource-section-grid">
-              {renderSelfHostedCluster(section.period)}
-              {renderVendorRuntime()}
-              {section.period === 'idle' || section.period === 'busy' ? renderFitRuntime(section.period) : renderCustomerModelRuntime()}
-            </div>
-          </section>
-        ))}
+        <section className="resource-section resource-section-info">
+          <div className="resource-section-title">资源信息</div>
+          <div className="realtime-board resource-section-grid resource-info-grid">
+            {renderSelfHostedCluster('realtime')}
+            {renderVendorRuntime()}
+          </div>
+        </section>
+        <section className="resource-section resource-section-runtime">
+          <div className="resource-section-title">客户模型跑量与资源拟合</div>
+          <div className="realtime-board resource-section-grid">
+            {renderCustomerModelRuntime()}
+            {renderFitRuntime('idle')}
+            {renderFitRuntime('busy')}
+          </div>
+        </section>
       </div>
     </>
   );

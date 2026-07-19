@@ -122,3 +122,14 @@ def test_exclude_customer_codes_drops_whole_customer(app):
     assert codes == {"C0100"}
     codes_none = {i.customer_code for i in build_usage_demand_items(exclude_customer_codes=())}
     assert codes_none == {"C0100", "C0101"}
+
+
+def test_restrict_to_sell_discount_keeps_only_sell_discount_pairs(app):
+    # C0100/glm-5.1 有售卖折扣；C0101/glm-5.2 无。开启限制后只保留有折扣的组合。
+    _seed(app)
+    keys = {(i.customer_code, i.model_name)
+            for i in build_usage_demand_items(restrict_to_sell_discount=True)}
+    assert keys == {("C0100", "glm-5.1")}
+    # 默认关闭：两个组合都在（向后兼容）
+    keys_all = {(i.customer_code, i.model_name) for i in build_usage_demand_items()}
+    assert keys_all == {("C0100", "glm-5.1"), ("C0101", "glm-5.2")}

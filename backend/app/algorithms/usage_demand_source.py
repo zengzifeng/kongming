@@ -48,6 +48,8 @@ def build_usage_demand_items(
     *,
     apply_self_provider_whitelist: bool | None = None,
     exclude_customer_codes: Iterable[str] | None = None,
+    period: str | None = None,
+    restrict_to_sell_discount: bool = False,
 ) -> list[DemandSnapshotItem]:
     """把实跑量按 (客户, 模型) 聚合成 DemandSnapshotItem 列表。
 
@@ -62,6 +64,11 @@ def build_usage_demand_items(
     口径开关（默认取 config，可回退）：
     - apply_self_provider_whitelist：自建须 provider ∈ 本模型自建集群白名单，否则改判三方。
     - exclude_customer_codes：整户剔除的 customer_code（转售/网络客户），其量不计入。
+    - period：idle/busy 时**只统计该时段小时**的数据（口径与波形拟合一致，全局忙时边界取
+      config.WAVE_FIT_BUSY_HOURS），使 input_ratio/cache_hit_rate/自建占比/量都反映该时段行为；
+      None（realtime 等）时统计全部小时（向后兼容）。
+    - restrict_to_sell_discount：置 True 时需求 universe **只保留在 customer_sell_discounts 表里
+      出现过的 (客户, 模型) 组合**（time_period 策略用）；未出现的客户/模型的用量整体不参与测算。
     """
     if apply_self_provider_whitelist is None:
         apply_self_provider_whitelist = _cfg("SELF_PROVIDER_WHITELIST_ENABLED", True)
@@ -70,10 +77,20 @@ def build_usage_demand_items(
     exclude_codes = set(exclude_customer_codes or ())
     whitelist = build_self_provider_whitelist() if apply_self_provider_whitelist else {}
 
+    # 时段过滤：仅统计该时段小时的实跑（口径与拟合一致），非 idle/busy 则不过滤。
+    period_hours: frozenset[int] | None = None
+    if period:
+        from ..models import WavePeriod
+        if period in WavePeriod.ALL:
+            from ..services.wave_fitting_service import WaveFittingService
+            period_hours = WaveFittingService.period_hours(period)
+
     code_by_id: dict[int, str] = {}
+    name_by_id: dict[int, str] = {}
     excluded_ids: set[int] = set()
     for c in db.session.execute(db.select(MonitorConsumer)).scalars():
         code_by_id[c.id] = c.customer_code
+        name_by_id[c.id] = c.customer_name or ""
         # __all__ 是全客户汇总口径，非单客户，不作为需求参与计算；同时排除整户剔除名单。
         if c.ai_consumer == GLOBAL_AI_CONSUMER or c.customer_code in exclude_codes:
             excluded_ids.add(c.id)
@@ -81,6 +98,10 @@ def build_usage_demand_items(
     discount_by_pair: dict[tuple[int, str], float] = {}
     for s in db.session.execute(db.select(CustomerSellDiscount)).scalars():
         discount_by_pair[(s.customer_id, s.model_name)] = float(s.sell_discount or 0)
+
+    # 售卖折扣白名单：restrict_to_sell_discount 时只保留 customer_sell_discounts 出现过的 (客户,模型)。
+    allowed_pairs = set(discount_by_pair.keys()) if restrict_to_sell_discount else None
+
 
     # 逐 (客户, 模型) 聚合器
     hourly_io: dict[tuple[int, str], dict[str, float]] = defaultdict(lambda: defaultdict(float))
@@ -110,6 +131,8 @@ def build_usage_demand_items(
     for (customer_id, model, data_time, io, ti, ot, ct, cmt, source, provider) in rows:
         if customer_id in excluded_ids:
             continue  # 整户剔除（转售/网络客户）
+        if period_hours is not None and data_time.hour not in period_hours:
+            continue  # 只统计该时段（idle/busy）小时的数据
         pair = (customer_id, model)
         io = float(io or 0)
         ts = data_time.isoformat()
@@ -130,6 +153,8 @@ def build_usage_demand_items(
 
     items: list[DemandSnapshotItem] = []
     for pair in sorted(hourly_io):
+        if allowed_pairs is not None and pair not in allowed_pairs:
+            continue  # restrict_to_sell_discount：非售卖折扣表内的 (客户,模型) 不参与
         customer_id, model = pair
         series_map = hourly_io[pair]
         series = [(ts, series_map[ts] / 60.0) for ts in sorted(series_map)]
@@ -149,6 +174,7 @@ def build_usage_demand_items(
         items.append(DemandSnapshotItem(
             report_id=f"USG-{customer_code}-{model}",
             customer_code=customer_code,
+            customer_name=name_by_id.get(customer_id, ""),
             model_name=model,
             expected_tpm=expected_tpm,
             expected_rpm=0.0,

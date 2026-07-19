@@ -13,6 +13,7 @@ class DemandSnapshotItem:
     expected_tpm: float
     expected_rpm: float
     discount_rate: float
+    customer_name: str = ""  # 客户名称（monitor_consumers.customer_name），输出用「名称+uid」展示
     input_ratio: float = 1.0  # 输入:输出 token 比值，如 3 表示 3:1；输出基准恒为 1
     cache_hit_rate: float = 0.0
     current_self_ratio: float = 0.0

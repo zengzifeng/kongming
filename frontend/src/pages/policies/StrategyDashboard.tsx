@@ -13,7 +13,7 @@ import { evaluationsApi, fittingsApi, jobsApi, policiesApi } from '../../api/kon
 import type { Evaluation, FittingConfig, JobSchedule, Policy, PolicyDetail } from '../../api/types';
 
 import { useAsync } from '../../hooks/useAsync';
-import { dateText, money, numberText, percent } from '../../utils/format';
+import { dateText, money, numberText, percent, ratioPercent } from '../../utils/format';
 
 type StrategyTemplateKey = 'demand_evaluation' | 'idle' | 'busy';
 
@@ -407,6 +407,34 @@ function flowFromMove(move: Record<string, unknown>, policy: Policy, index: numb
   };
 }
 
+function slotHour(slot: Record<string, unknown>): number {
+  const raw = slot['hour'];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  const ts = stringField(slot, 'ts', stringField(slot, 'time', ''));
+  // ts 形如 "2026-07-19T09:00:00"，直接截取小时位，避免时区解析偏移。
+  if (ts.length >= 13 && ts[10] === 'T') {
+    const hour = Number(ts.slice(11, 13));
+    if (Number.isFinite(hour)) return hour;
+  }
+  const parsed = new Date(ts);
+  return Number.isNaN(parsed.getTime()) ? -1 : parsed.getHours();
+}
+
+// 用后端 watermark_changes 行里的逐时 slots 还原客户实跑波形（按 ts 小时落到 0..23）；
+// 无 slots 的行（如 accepted_customers / customer_watermark_delta）返回 null，由调用方回退。
+function hourlySeriesFromSlots(slots: Record<string, unknown>[]): number[] | null {
+  if (!slots.length) return null;
+  const series = Array.from({ length: 24 }, () => 0);
+  let matched = false;
+  slots.forEach((slot) => {
+    const hour = slotHour(slot);
+    if (hour < 0 || hour > 23) return;
+    series[hour] = numberField(slot, 'tpm', numberField(slot, 'self_tpm', 0));
+    matched = true;
+  });
+  return matched ? series : null;
+}
+
 function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, index: number): StrategyAttribution {
   // 后端 watermark_changes 行用 watermark_self_tpm / current_self_ratio / customer_revenue_gain；
   // model_rebalance.customer_watermark_delta 行用 watermark_before / watermark_after / delta。
@@ -432,7 +460,8 @@ function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, 
     deltaVolume: delta / 10000,
     gain,
     fallback: stringField(row, 'fallback', stringField(row, 'reason', '-')),
-    series: Array.from({ length: 24 }, () => Math.max(before, after)),
+    // 优先用后端逐时 slots 还原真实波形；无 slots 才回退到峰值水位线的平直线。
+    series: hourlySeriesFromSlots(arrayField(row, 'slots')) ?? Array.from({ length: 24 }, () => Math.max(before, after)),
   };
 }
 
@@ -465,7 +494,10 @@ function timePeriodPlanFromPolicy(policy: Policy, kind: Extract<StrategyPlanKind
   // node_moves 已是「机器重分配 + 模型级再平衡」按集群粒度聚合后的完整列表，直接用它即可，
   // 不再并入 rb.moves（那是再平衡子集，合并会导致同一源→目集群重复展示）。
   const moves = arrayField(summary, 'node_moves');
-  const watermarkChanges = uniqueRecords([...arrayField(summary, 'watermark_changes'), ...arrayField(rb, 'customer_watermark_delta'), ...arrayField(summary, 'accepted_customers')], ['customer', 'customer_code', 'model', 'model_name', 'watermark_before', 'watermark_after', 'before_watermark', 'watermark', 'gain_yuan_day', 'gain']);
+  // 按 (customer_code, model) 去重：同一客户可能同时出现在 watermark_changes（D阶段最终水位，带真实
+  // customer_revenue_gain + slots）和 model_rebalance.customer_watermark_delta（C2再平衡归因，无 gain）。
+  // watermark_changes 排在前 → 保留它、丢掉 rebalance-delta 的重复行，避免同一客户两行且密度不一致。
+  const watermarkChanges = uniqueRecords([...arrayField(summary, 'watermark_changes'), ...arrayField(rb, 'customer_watermark_delta'), ...arrayField(summary, 'accepted_customers')], ['customer_code', 'model']);
   const expectedGain = kind === 'idle' ? Number(policy.expected_off_peak_gain || policy.expected_revenue_gain || 0) : Number(policy.expected_revenue_gain || 0);
   return {
     id: `${kind}-${policy.id}`,
@@ -972,11 +1004,11 @@ function StrategyPlanDetail({ plan, policy, detail }: StrategyPlanDetailProps) {
               { title: '源集群', dataIndex: 'source' },
               { title: '源模型', dataIndex: 'sourceModel', render: (value, record) => <span className="strategy-code-cell">{value} {record.sourceRate}</span> },
               { title: '源机器台数', render: (_, record) => `${record.sourceMachinesBefore} -> ${record.sourceMachinesAfter} 台` },
-              { title: '源利用率变化', render: (_, record) => `${percent(record.sourceUtilizationBefore)} -> ${percent(record.sourceUtilizationAfter)}` },
+              { title: '源利用率变化', render: (_, record) => `${ratioPercent(record.sourceUtilizationBefore)} -> ${ratioPercent(record.sourceUtilizationAfter)}` },
               { title: '接受集群', dataIndex: 'target' },
               { title: '接受模型', dataIndex: 'targetModel', render: (value, record) => <span className="strategy-code-cell">{value} {record.targetRate}</span> },
               { title: '接受机器台数', render: (_, record) => `${record.targetMachinesBefore} -> ${record.targetMachinesAfter} 台` },
-              { title: '接受利用率变化', render: (_, record) => `${percent(record.targetUtilizationBefore)} -> ${percent(record.targetUtilizationAfter)}` },
+              { title: '接受利用率变化', render: (_, record) => `${ratioPercent(record.targetUtilizationBefore)} -> ${ratioPercent(record.targetUtilizationAfter)}` },
               { title: '腾挪机器', dataIndex: 'machines', render: (value) => `${value} 台` },
               { title: '收益', dataIndex: 'gain', render: (value) => <span className="positive">+{money(value)}/天</span> },
             ]}
