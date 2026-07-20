@@ -110,6 +110,7 @@ class RealtimeSolver(SolverEconomicsMixin):
                 rejected.append({
                     "report_id": candidate.demand.report_id,
                     "customer_code": candidate.demand.customer_code,
+                    "customer_name": candidate.demand.customer_name,
                     "reason": "self_cluster_capacity_insufficient_after_node_move" if node_move_attempted
                     else "self_cluster_capacity_insufficient",
                 })
@@ -156,7 +157,8 @@ class RealtimeSolver(SolverEconomicsMixin):
                 "vendor_remaining_tpm": vendor_remaining,
                 # 预警：三方侧亏损（售卖折扣<=采购折扣）的客户，供人工关注是否手动全挪自建
                 "must_move_customers": [
-                    {"report_id": c.demand.report_id, "customer_code": c.demand.customer_code}
+                    {"report_id": c.demand.report_id, "customer_code": c.demand.customer_code,
+                     "customer_name": c.demand.customer_name}
                     for c in candidates if c.must_move
                 ],
             },
@@ -257,6 +259,7 @@ class RealtimeSolver(SolverEconomicsMixin):
         watermark = {
             "report_id": demand.report_id,
             "customer_code": demand.customer_code,
+            "customer_name": demand.customer_name,
             "model": demand.model_name,
             "from_self_ratio": demand.current_self_ratio,
             "to_self_ratio": target_self_ratio,
@@ -270,6 +273,7 @@ class RealtimeSolver(SolverEconomicsMixin):
         accepted_customers.append({
             "report_id": demand.report_id,
             "customer_code": demand.customer_code,
+            "customer_name": demand.customer_name,
             "model": demand.model_name,
             "allocated_tpm_self": target_self_tpm,
             "incremental_tpm_self": allocated_self_tpm,
@@ -287,6 +291,7 @@ class RealtimeSolver(SolverEconomicsMixin):
             payload={
                 "report_id": demand.report_id,
                 "customer_code": demand.customer_code,
+                "customer_name": demand.customer_name,
                 "model": demand.model_name,
                 "allocated_tpm_self": target_self_tpm,
                 "incremental_tpm_self": allocated_self_tpm,

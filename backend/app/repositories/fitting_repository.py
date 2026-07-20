@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
 from ..models import (
     CustomerFittingConfig,
+    CustomerSellDiscount,
     FittingAlgorithm,
     FittingResult,
+    MonitorConsumer,
 )
 from .base_repository import BaseRepository
+
 
 
 class FittingAlgorithmRepository(BaseRepository[FittingAlgorithm]):
@@ -77,7 +80,8 @@ class FittingResultRepository(BaseRepository[FittingResult]):
 
     def list(self, level: str | None = None, customer_code: str | None = None,
              model_name: str | None = None, period: str | None = None,
-             page: int = 1, page_size: int = 50):
+             page: int = 1, page_size: int = 50,
+             restrict_to_sell_discount: bool = False):
         filters = []
         if level:
             filters.append(FittingResult.level == level)
@@ -87,6 +91,12 @@ class FittingResultRepository(BaseRepository[FittingResult]):
             filters.append(FittingResult.model_name == model_name)
         if period:
             filters.append(FittingResult.period == period)
+        if restrict_to_sell_discount:
+            filters.append(exists().where(
+                CustomerSellDiscount.customer_id == MonitorConsumer.id,
+                MonitorConsumer.customer_code == FittingResult.customer_code,
+                CustomerSellDiscount.model_name == FittingResult.model_name,
+            ))
         return self.list_paginated(
             filters=filters,
             order_by=FittingResult.generated_at.desc(),
@@ -95,6 +105,7 @@ class FittingResultRepository(BaseRepository[FittingResult]):
         )
 
     def latest_for(self, level: str, customer_code: str | None, model_name: str,
+
                    period: str, cluster_name: str | None = None) -> FittingResult | None:
         stmt = select(FittingResult).where(
             FittingResult.level == level,

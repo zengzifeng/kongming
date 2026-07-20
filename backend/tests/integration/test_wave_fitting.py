@@ -2,9 +2,9 @@
 from datetime import datetime
 
 from app.extensions import db
-from app.models import MonitorConsumer, CustomerUsageHourly
-
+from app.models import CustomerSellDiscount, MonitorConsumer, CustomerUsageHourly, ProviderMapping
 from tests.conftest import seed_cluster
+
 
 
 def _usage(cust_id, model, dt, io):
@@ -124,8 +124,44 @@ def test_run_fitting_produces_customer_and_cluster_results(client, app):
     assert res.json["data"]["total"] == 2
 
 
+def test_results_restrict_to_sell_discount_filters_and_names(client, app):
+
+    cust = _seed_usage(app)
+    other = MonitorConsumer(ai_consumer="客户B", customer_code="C0300",
+                            customer_name="客户B", level="B")
+    db.session.add(other)
+    db.session.flush()
+    db.session.add(_usage(other.id, "glm-5.1", datetime(2026, 7, 7, 10, 0, 0), 1800))
+    db.session.add(CustomerSellDiscount(
+        customer_id=cust.id, customer_name="客户A", model_name="glm-5.1",
+        sell_discount=0.65, effective_from=datetime(2026, 7, 1).date(),
+    ))
+    db.session.add(ProviderMapping(
+        customer_name="客户A", model_name="glm-5.1", provider="prov", cluster_name="glm-5.1",
+    ))
+    db.session.flush()
+
+    for code in ("C0200", "C0300"):
+        client.post("/api/v1/fittings/configs", json={
+            "customer_code": code, "model_name": "glm-5.1",
+            "period": "busy", "algo_name": "demo"})
+    client.post("/api/v1/fittings/run")
+
+    res = client.get("/api/v1/fittings/results?level=customer&period=busy")
+    assert res.json["data"]["total"] == 2
+
+    res = client.get("/api/v1/fittings/results?level=customer&period=busy&restrict_to_sell_discount=true")
+    assert res.status_code == 200, res.json
+    items = res.json["data"]["items"]
+    assert [item["customer_code"] for item in items] == ["C0200"]
+    assert items[0]["ai_consumer"] == "客户A"
+    assert items[0]["customer_name"] == "客户A"
+    assert items[0]["cluster_name"] == "glm-5.1"
+
+
 def test_run_fitting_delta_applied(client, app):
     _seed_usage(app)
+
     client.post("/api/v1/fittings/configs", json={
         "customer_code": "C0200", "model_name": "glm-5.1",
         "period": "busy", "algo_name": "demo", "params_json": {"delta_tpm": 6.0}})

@@ -346,7 +346,9 @@ export interface FittingConfig extends BaseEntity {
 
 export interface FittingResult extends BaseEntity {
   level: 'customer' | 'cluster';
+  customer_code: string | null;
   ai_consumer: string | null;
+  customer_name: string | null;
   cluster_name: string | null;
   model_name: string;
   period: 'idle' | 'busy';
@@ -357,6 +359,7 @@ export interface FittingResult extends BaseEntity {
 }
 
 export interface FittingResultsResponse {
+
   items: FittingResult[];
   total: number;
 }

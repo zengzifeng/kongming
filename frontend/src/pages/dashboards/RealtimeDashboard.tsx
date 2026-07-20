@@ -65,6 +65,8 @@ interface FitWaveLine extends ChartLine {
 
 interface CustomerWatermark {
   key: string;
+  selfKey: string;
+  vendorKey: string;
   name: string;
   color: string;
   peakDemand: number;
@@ -75,10 +77,10 @@ interface CustomerWatermark {
 
 interface CustomerDispatchRatio {
   key: string;
+  selfKey: string;
+  vendorKey: string;
   name: string;
   color: string;
-  selfRatio: number;
-  vendorRatio: number;
 }
 
 interface CustomerFitWave {
@@ -375,48 +377,96 @@ function buildFittingChart(results: FittingResult[]) {
   return { data: rows, lines, yDomain: chartDomain(rows, lines), yTicks: chartTicks(rows, lines), hourlyByLine };
 }
 
+function fittingCustomerKey(result: FittingResult) {
+  return result.customer_code || result.ai_consumer || result.cluster_name || result.model_name;
+}
+
+function fittingCustomerName(result: FittingResult) {
+  const name = result.customer_name || result.ai_consumer || result.customer_code || result.cluster_name || result.model_name;
+  return result.customer_code && name !== result.customer_code ? `${name} (${result.customer_code})` : name;
+}
+
+const hiddenFitCustomerKeywords = ['金山云网络'];
+
+function shouldShowFitCustomer(result: FittingResult) {
+  const fields = [result.customer_name, result.ai_consumer, result.customer_code].filter(Boolean).map(String);
+  return !fields.some((field) => hiddenFitCustomerKeywords.some((keyword) => field.includes(keyword)));
+}
+
+function normalizeDispatchRatio(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+  const ratio = Number(value);
+  return Math.max(0, Math.min(1, ratio > 1 ? ratio / 100 : ratio));
+}
+
+function consumerSnapshotMatches(result: FittingResult, snapshot: ConsumerTpmSnapshot) {
+  return snapshot.ai_model === result.model_name && (
+    (result.customer_code && snapshot.customer_code === result.customer_code) ||
+    (!result.customer_code && result.ai_consumer && snapshot.ai_consumer === result.ai_consumer)
+  );
+}
+
+function dispatchRatios(snapshot: ConsumerTpmSnapshot | undefined) {
+  const selfRatio = normalizeDispatchRatio(snapshot?.self_ratio);
+  const vendorRatio = normalizeDispatchRatio(snapshot?.thirdparty_ratio);
+  const self = selfRatio ?? (vendorRatio === null ? 0 : Math.max(1 - vendorRatio, 0));
+  const vendor = vendorRatio ?? Math.max(1 - self, 0);
+  return { selfRatio: self, vendorRatio: vendor };
+}
+
 function buildCustomerFitWaves(results: FittingResult[], ratios: ConsumerTpmSnapshot[]): CustomerFitWave[] {
+
   const byModel = new Map<string, FittingResult[]>();
   sortLatestFittingResults(results).forEach((result) => {
-    if (!hasVisibleFittingSeries(result)) return;
+    if (!result.model_name || !hasVisibleFittingSeries(result) || !shouldShowFitCustomer(result)) return;
     const items = byModel.get(result.model_name) || [];
     items.push(result);
     byModel.set(result.model_name, items);
   });
+
   return Array.from(byModel.entries()).map(([model, modelResults]) => {
-    // 不再 slice(0,6)：展示该模型下全部有有效拟合序列的客户；同一客户只取最新一条。
-    const byCustomer = new Map<string, FittingResult>();
+    const byCustomerModel = new Map<string, FittingResult>();
     modelResults.forEach((result) => {
-      const key = result.ai_consumer || result.cluster_name || result.model_name;
-      if (key && !byCustomer.has(key)) byCustomer.set(key, result);
+      const key = `${fittingCustomerKey(result)}::${result.model_name}`;
+      if (key && !byCustomerModel.has(key)) byCustomerModel.set(key, result);
     });
-    const selected = Array.from(byCustomer.values());
-    const lines = selected.map((result, index) => ({
-      key: `customer${index}`,
-      name: result.ai_consumer || result.cluster_name || result.model_name,
-      color: chartColors[index % chartColors.length],
-      strokeDasharray: index === 2 ? '5 5' : undefined,
-    }));
-    // 按时间标签合并：并集各客户时间戳、缺值补 0，保证各线 X 轴对齐、不丢时段
-    // （旧版按 pointIndex 对齐，客户点数不一致时会错位）。
+    const selected = Array.from(byCustomerModel.values());
+    const customerName = (result: FittingResult) => fittingCustomerName(result);
+    const lines = selected.flatMap((result, index) => {
+      const baseKey = `customer${index}`;
+      const color = chartColors[index % chartColors.length];
+      const name = customerName(result);
+      return [
+        { key: `${baseKey}Self`, name: `${name} 自建`, color },
+        { key: `${baseKey}Vendor`, name: `${name} 三方`, color, strokeDasharray: '5 5' },
+      ];
+    });
+
     const byTime = new Map<string, Record<string, number | string>>();
+    const dispatchItems: CustomerDispatchRatio[] = [];
     selected.forEach((result, resultIndex) => {
-      const key = `customer${resultIndex}`;
+      const baseKey = `customer${resultIndex}`;
+      const selfKey = `${baseKey}Self`;
+      const vendorKey = `${baseKey}Vendor`;
+      const color = chartColors[resultIndex % chartColors.length];
+      const snapshots = ratios.filter((item) => consumerSnapshotMatches(result, item));
+      const snapshotsByTime = new Map(snapshots.map((item) => [timeLabel(item.data_time), item]));
+      const fallbackRatios = dispatchRatios(snapshots[snapshots.length - 1]);
+      dispatchItems.push({ key: baseKey, selfKey, vendorKey, name: customerName(result), color });
       (result.series_json || []).forEach(([ts, value]) => {
         const time = timeLabel(ts);
         const row = byTime.get(time) || { time };
-        row[key] = Number(value || 0);
+        const snapshot = snapshotsByTime.get(time);
+        const totalTpm = Number(value ?? snapshot?.tpm ?? 0);
+        const currentRatios = snapshot ? dispatchRatios(snapshot) : fallbackRatios;
+        row[selfKey] = totalTpm * currentRatios.selfRatio;
+        row[vendorKey] = totalTpm * currentRatios.vendorRatio;
         byTime.set(time, row);
       });
     });
     const data = Array.from(byTime.values()).sort((a, b) => String(a.time).localeCompare(String(b.time)));
-    const dispatchRatios = selected.map((result, index) => {
-      const current = ratios.find((item) => item.ai_model === result.model_name && item.ai_consumer === result.ai_consumer);
-      const selfRatio = Number(current?.self_ratio || 0);
-      const vendorRatio = Number(current?.thirdparty_ratio ?? Math.max(1 - selfRatio, 0));
-      return { key: `customer${index}`, name: result.ai_consumer || result.cluster_name || result.model_name, color: chartColors[index % chartColors.length], selfRatio, vendorRatio };
-    });
-    return { model, data, lines, ratios: dispatchRatios, yDomain: chartDomain(data, lines), yTicks: chartTicks(data, lines) };
+
+    return { model, data, lines, ratios: dispatchItems, yDomain: chartDomain(data, lines), yTicks: chartTicks(data, lines) };
   });
 }
 
@@ -487,14 +537,17 @@ function getLineMax(data: Array<Record<string, number | string>>, key: string) {
 
 function getCustomerWatermarks(wave: CustomerFitWave): CustomerWatermark[] {
   return wave.ratios.map((item) => {
-    const peakDemand = getLineMax(wave.data, item.key);
+    const selfPeak = getLineMax(wave.data, item.selfKey);
+    const vendorPeak = getLineMax(wave.data, item.vendorKey);
     return {
       key: item.key,
+      selfKey: item.selfKey,
+      vendorKey: item.vendorKey,
       name: item.name,
       color: item.color,
-      peakDemand,
-      selfWatermark: Math.round(peakDemand * item.selfRatio),
-      vendorTakeover: Math.round(peakDemand * item.vendorRatio),
+      peakDemand: selfPeak + vendorPeak,
+      selfWatermark: Math.round(selfPeak),
+      vendorTakeover: Math.round(vendorPeak),
 
     };
   });
@@ -736,14 +789,15 @@ export function RealtimeDashboard() {
     }).catch(() => undefined);
 
 
-    fittingsApi.results({ level: 'customer', period: 'idle', page_size: 100 }).then((data) => {
+    fittingsApi.results({ level: 'customer', period: 'idle', restrict_to_sell_discount: true, page_size: 1000 }).then((data) => {
       if (cancelled) return;
       setIdleCustomerFits(data.items || []);
     }).catch(() => undefined);
-    fittingsApi.results({ level: 'customer', period: 'busy', page_size: 100 }).then((data) => {
+    fittingsApi.results({ level: 'customer', period: 'busy', restrict_to_sell_discount: true, page_size: 1000 }).then((data) => {
       if (cancelled) return;
       setBusyCustomerFits(data.items || []);
     }).catch(() => undefined);
+
     return () => { cancelled = true; };
   }, []);
 
@@ -1046,14 +1100,15 @@ export function RealtimeDashboard() {
               type="button"
               className={`customer-watermark-item${isSelected ? ' is-selected' : ''}`}
               key={item.key}
-              title={`${item.name} | 跑量峰值 ${numberText(item.peakDemand)} TPM | 自建水位线 ${numberText(item.selfWatermark)} TPM | 三方承接 ${numberText(item.vendorTakeover)} TPM`}
+              title={`${item.name} | 跑量峰值 ${numberText(item.peakDemand)} TPM | 自建峰值 ${numberText(item.selfWatermark)} TPM | 三方峰值 ${numberText(item.vendorTakeover)} TPM`}
               onClick={() => setSelectedCustomerKey((current) => (current === item.key ? null : item.key))}
             >
               <span className="customer-watermark-name"><i style={{ backgroundColor: item.color }} />{item.name}</span>
               {isSelected ? (
                 <span className="customer-watermark-values">
-                  <span><b>实际/拟合跑量</b>{numberText(item.peakDemand)}</span>
-                  <span><b>自建水位线</b>{numberText(item.selfWatermark)}</span>
+                  <span><b>跑量峰值</b>{numberText(item.peakDemand)}</span>
+                  <span><b>自建峰值</b>{numberText(item.selfWatermark)}</span>
+                  <span><b>三方峰值</b>{numberText(item.vendorTakeover)}</span>
                 </span>
               ) : null}
             </button>
@@ -1070,10 +1125,13 @@ export function RealtimeDashboard() {
     const clusterFit = isBusy ? busyClusterFit : idleClusterFit;
     const customerWaves = isBusy ? busyCustomerFitWaves : idleCustomerFitWaves;
     const selectedCustomerFitWave = customerWaves.find((item) => item.model === selectedFitModel) || customerWaves[0] || emptyCustomerFitWave();
+    const selectedFitModelValue = selectedCustomerFitWave.model !== '-' ? selectedCustomerFitWave.model : undefined;
     const watermarks = getCustomerWatermarks(selectedCustomerFitWave);
 
     const selectedWatermark = watermarks.find((item) => item.key === selectedCustomerKey) || null;
+
     const activeCustomerKey = selectedWatermark?.key || null;
+    const customerKeyFromLineKey = (key: string) => selectedCustomerFitWave.ratios.find((item) => item.selfKey === key || item.vendorKey === key)?.key || key;
 
     // 取某集群在「当前小时」的拟合值：当前整点命中序列则直接取；否则取序列中与当前小时
     // 距离最近的一点的值（如闲时序列 0-8 点、当前 14 点时回退到最近的 08:00）。
@@ -1134,9 +1192,10 @@ export function RealtimeDashboard() {
             <Form layout="inline" className="idle-fit-filter">
               <Form.Item label="模型">
                 <Select
-                  value={selectedFitModel}
+                  value={selectedFitModelValue}
                   onChange={(model) => {
                     setSelectedFitModel(model);
+
                     setSelectedCustomerKey(null);
                   }}
 
@@ -1148,17 +1207,19 @@ export function RealtimeDashboard() {
             </Form>
           </div>
           <RuntimeLineChart
-            title={`${selectedCustomerFitWave.model} 重点客户${isBusy ? '忙时' : '闲时'}模拟`}
+            title={`${selectedCustomerFitWave.model} 模型维度重点客户${isBusy ? '忙时' : '闲时'}自建/三方跑量`}
             data={selectedCustomerFitWave.data}
             lines={selectedCustomerFitWave.lines}
             yDomain={selectedCustomerFitWave.yDomain}
             yTicks={selectedCustomerFitWave.yTicks}
             yFormatter={formatTpm}
-            tooltipSingleKey={selectedCustomerKey}
-            selectedLineKey={activeCustomerKey}
-            referenceLines={selectedWatermark ? [{ key: `${selectedWatermark.key}-self-watermark`, name: `${selectedWatermark.name} 自建水位线`, color: selectedWatermark.color, value: selectedWatermark.selfWatermark, strokeDasharray: '6 6' }] : []}
-            onLineClick={(key) => setSelectedCustomerKey((current) => (current === key ? null : key))}
-            forceSolidLines
+            tooltipSingleKey={selectedWatermark?.selfKey || null}
+            selectedLineKey={activeCustomerKey ? selectedWatermark?.selfKey || null : null}
+            referenceLines={selectedWatermark ? [{ key: `${selectedWatermark.key}-self-watermark`, name: `${selectedWatermark.name} 自建峰值`, color: selectedWatermark.color, value: selectedWatermark.selfWatermark, strokeDasharray: '6 6' }] : []}
+            onLineClick={(key) => {
+              const customerKey = customerKeyFromLineKey(key);
+              setSelectedCustomerKey((current) => (current === customerKey ? null : customerKey));
+            }}
 
           />
 

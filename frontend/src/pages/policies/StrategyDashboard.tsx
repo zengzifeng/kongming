@@ -17,8 +17,11 @@ import { dateText, money, numberText, percent, ratioPercent } from '../../utils/
 
 type StrategyTemplateKey = 'demand_evaluation' | 'idle' | 'busy';
 
+const demandEvaluationStrategyLabel = '实时策略';
+const legacyDemandEvaluationStrategyLabel = '需求评估策略';
+
 const strategyTemplateOptions: Array<{ label: string; value: StrategyTemplateKey; algorithm: string }> = [
-  { label: '需求评估策略', value: 'demand_evaluation', algorithm: 'demand_evaluation' },
+  { label: demandEvaluationStrategyLabel, value: 'demand_evaluation', algorithm: 'demand_evaluation' },
   { label: '闲时策略', value: 'idle', algorithm: 'time_period' },
   { label: '忙时策略', value: 'busy', algorithm: 'time_period' },
 ];
@@ -47,7 +50,12 @@ interface StrategyFlow {
 
 interface StrategyAttribution {
   customer: string;
+  customerName: string;
+  uid: string;
   model: string;
+  pricePerMillionTokens: number;
+  marginalRevenue: number;
+  unitSelfRevenue: number;
   density: number;
   beforeRatio: number;
   afterRatio: number;
@@ -56,6 +64,9 @@ interface StrategyAttribution {
   beforeVolume: number;
   afterVolume: number;
   deltaVolume: number;
+  beforeArea: number;
+  afterArea: number;
+  deltaArea: number;
   gain: number;
   fallback: string;
   series: number[];
@@ -348,7 +359,7 @@ function isDemandEvaluationPolicy(policy: Policy) {
   if (policy.scenario) return policy.scenario === 'demand_evaluation';
   const template = summaryField(policy, 'template');
   const module = summaryField(policy, 'module');
-  return policy.algorithm === 'demand_evaluation' || module === 'demand_evaluation' || template === '需求评估策略';
+  return policy.algorithm === 'demand_evaluation' || module === 'demand_evaluation' || [demandEvaluationStrategyLabel, legacyDemandEvaluationStrategyLabel].includes(template);
 }
 
 function stringField(source: Record<string, unknown> | undefined, key: string, fallback = '') {
@@ -446,11 +457,24 @@ function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, 
   const delta = numberField(row, 'delta', after - before);
   const gain = numberField(row, 'gain_yuan_day', numberField(row, 'customer_revenue_gain', Number(policy.expected_revenue_gain || 0) / Math.max(index + 1, 1)));
   const base = Math.max(before, after, 1);
+  const series = hourlySeriesFromSlots(arrayField(row, 'slots')) ?? Array.from({ length: 24 }, () => Math.max(before, after));
+  const beforeArea = series.reduce((sum, demand) => sum + Math.min(demand, before), 0) / 10000;
+  const afterArea = series.reduce((sum, demand) => sum + Math.min(demand, after), 0) / 10000;
+
+  const uid = stringField(row, 'customer_code', stringField(row, 'report_id', '-'));
+  const customerName = stringField(row, 'customer_name', stringField(row, 'customer', uid));
+  const customerLabel = customerName && customerName !== uid ? `${customerName}（${uid}）` : uid;
+  const unitSelfRevenue = numberField(row, 'unit_self_revenue', 0);
 
   return {
-    customer: stringField(row, 'customer', stringField(row, 'customer_code', stringField(row, 'report_id', '-'))),
+    customer: customerLabel,
+    customerName,
+    uid,
     model: stringField(row, 'model', stringField(row, 'model_name', '-')),
-    density: delta ? gain / Math.abs(delta) : 0,
+    pricePerMillionTokens: unitSelfRevenue,
+    marginalRevenue: gain,
+    unitSelfRevenue,
+    density: delta ? gain / delta : 0,
     beforeRatio: before / base,
     afterRatio: after / base,
     watermarkBefore: before,
@@ -458,10 +482,13 @@ function attributionFromWatermark(row: Record<string, unknown>, policy: Policy, 
     beforeVolume: before / 10000,
     afterVolume: after / 10000,
     deltaVolume: delta / 10000,
+    beforeArea,
+    afterArea,
+    deltaArea: afterArea - beforeArea,
     gain,
     fallback: stringField(row, 'fallback', stringField(row, 'reason', '-')),
     // 优先用后端逐时 slots 还原真实波形；无 slots 才回退到峰值水位线的平直线。
-    series: hourlySeriesFromSlots(arrayField(row, 'slots')) ?? Array.from({ length: 24 }, () => Math.max(before, after)),
+    series,
   };
 }
 
@@ -510,7 +537,9 @@ function timePeriodPlanFromPolicy(policy: Policy, kind: Extract<StrategyPlanKind
     expectedGain,
     status: policy.status,
     flows: moves.map((move, index) => flowFromMove(move, policy, index)),
-    attributions: watermarkChanges.map((row, index) => attributionFromWatermark(row, policy, index)),
+    // 逐调整收益核算按「百万token单价」降序——与求解器承接优先级(C阶段候选排序键)一致。
+    attributions: watermarkChanges.map((row, index) => attributionFromWatermark(row, policy, index))
+      .sort((a, b) => b.unitSelfRevenue - a.unitSelfRevenue || b.gain - a.gain),
     utilRows: utilRowsFromPolicy(policy),
     detailLead: kind === 'idle' ? '闲时策略来自后端时段策略摘要。' : '忙时策略来自后端时段策略摘要。',
   };
@@ -549,15 +578,15 @@ function demandEvaluationPlanFromPolicy(policy: Policy, evaluation?: Evaluation)
     expectedGain,
     status,
     flows: [
-      { source: '需求报备', sourceModel: reportId, sourceRate: `${formatTpm(tpm)} TPM`, sourceMachinesBefore: 0, sourceMachinesAfter: Math.max(1, Math.ceil(tpm / 100000)), machines: Math.max(1, Math.ceil(tpm / 100000)), target: '需求评估策略', targetModel: actionPayload.model, targetRate: `可行性 ${percent(feasibility)}`, targetMachinesBefore: 0, targetMachinesAfter: Math.max(1, Math.ceil(tpm / 100000)), sourceUtilizationBefore: feasibility, sourceUtilizationAfter: benefit, targetUtilizationBefore: feasibility, targetUtilizationAfter: benefit, gain: expectedGain },
+      { source: '需求报备', sourceModel: reportId, sourceRate: `${formatTpm(tpm)} TPM`, sourceMachinesBefore: 0, sourceMachinesAfter: Math.max(1, Math.ceil(tpm / 100000)), machines: Math.max(1, Math.ceil(tpm / 100000)), target: demandEvaluationStrategyLabel, targetModel: actionPayload.model, targetRate: `可行性 ${percent(feasibility)}`, targetMachinesBefore: 0, targetMachinesAfter: Math.max(1, Math.ceil(tpm / 100000)), sourceUtilizationBefore: feasibility, sourceUtilizationAfter: benefit, targetUtilizationBefore: feasibility, targetUtilizationAfter: benefit, gain: expectedGain },
     ],
     attributions: [
-      { customer: reportId, model: actionPayload.model, density: benefit, beforeRatio: feasibility, afterRatio: benefit, watermarkBefore: Math.round(tpm * feasibility), watermark: tpm, beforeVolume: Number(actionPayload.expected_cost || 0), afterVolume: Number(actionPayload.expected_revenue || 0), deltaVolume: expectedGain, gain: expectedGain, fallback: actionPayload.recommendation, series: Array.from({ length: 24 }, (_, hour) => Math.round(tpm * (0.68 + Math.sin((hour / 24) * Math.PI) * 0.28 + (hour % 5) * 0.015))) },
+      { customer: reportId, customerName: reportId, uid: reportId, model: actionPayload.model, pricePerMillionTokens: 0, marginalRevenue: expectedGain, unitSelfRevenue: 0, density: benefit, beforeRatio: feasibility, afterRatio: benefit, watermarkBefore: Math.round(tpm * feasibility), watermark: tpm, beforeVolume: Number(actionPayload.expected_cost || 0), afterVolume: Number(actionPayload.expected_revenue || 0), deltaVolume: expectedGain, beforeArea: 0, afterArea: 0, deltaArea: 0, gain: expectedGain, fallback: actionPayload.recommendation, series: Array.from({ length: 24 }, (_, hour) => Math.round(tpm * (0.68 + Math.sin((hour / 24) * Math.PI) * 0.28 + (hour % 5) * 0.015))) }, 
     ],
     utilRows: [
       { cluster: '需求评估', model: actionPayload.model, capacityBefore: money(actionPayload.expected_cost), capacityAfter: money(actionPayload.expected_revenue), utilizationBefore: feasibility, utilizationAfter: benefit },
     ],
-    detailLead: '需求评估策略以需求报备、可行性和收益测算为输入。人工确认后需求看板状态变为确认，驳回后同步变为驳回。',
+    detailLead: `${demandEvaluationStrategyLabel}以需求报备、可行性和收益测算为输入。人工确认后需求看板状态变为确认，驳回后同步变为驳回。`,
   };
 }
 
@@ -597,7 +626,7 @@ function EvaluationModule({ evaluations, policies, onCreate, onReload, onOpenPla
       <div className="strategy-module-head">
         <div>
           <div className="strategy-module-eyebrow">Evaluation</div>
-          <div className="wire-card-title">需求评估策略</div>
+          <div className="wire-card-title">{demandEvaluationStrategyLabel}</div>
         </div>
         <Space>
           <Button size="small" icon={<ReloadOutlined />} onClick={onReload}>刷新</Button>
@@ -618,7 +647,7 @@ function EvaluationModule({ evaluations, policies, onCreate, onReload, onOpenPla
         dataSource={rows}
         pagination={false}
         scroll={{ x: 'max-content' }}
-        locale={{ emptyText: <EmptyState description="暂无需求评估策略" /> }}
+        locale={{ emptyText: <EmptyState description={`暂无${demandEvaluationStrategyLabel}`} /> }}
         columns={[
           { title: '策略 ID', render: (_, { policy }) => <span className="strategy-code-cell">{stringField(policy.summary_json, 'demand_strategy_id', policy.policy_no)}</span> },
           { title: '关联需求 ID', render: (_, { policy }) => {
@@ -1023,12 +1052,10 @@ function StrategyPlanDetail({ plan, policy, detail }: StrategyPlanDetailProps) {
             '评估收益 = 预计收入 - 预计成本；可行性与客户价值作为人工确认依据，确认或驳回会同步需求看板状态。'
           ) : (
             <>
-              <p>单日调整收益总和 = {plan.attributions.map((item) => money(item.gain)).join(' + ')} = {money(totalDailyGain)}/天。</p>
-              <ul className="strategy-formula-list">
-                {plan.attributions.map((item) => (
-                  <li key={`${item.customer}-${item.model}`}>{item.customer} / {item.model}：单TPM收入 {item.density.toFixed(4)} 元/TPM x delta自建增加调用量 {numberText(item.deltaVolume)} 万TPM x 10,000 = {money(item.gain)}/天；调整前自建水位 {numberText(item.beforeVolume)} 万TPM，调整后自建水位 {numberText(item.afterVolume)} 万TPM。</li>
-                ))}
-              </ul>
+              <p>delta自建增加调用量 = 调整后水位 - 调整前水位；边际收入 = 本次水位调整带来的单客户收益贡献；单日调整收益总和 = {money(totalDailyGain)}/天。</p>
+              <p>调整前水位表示当前自建承接上限，调整后水位表示策略给该客户模型设置的新自建承接上限，delta为本次预计新增自建承接量。</p>
+              <p>面积按逐时自建承接量求和：每小时取 min(客户实跑, 水位线)，分别计算调整前面积、调整后面积和面积变化。</p>
+              <p>「优先级」按百万token单价降序，与求解器承接排序一致：单价越高越优先承接自建。</p>
             </>
           )}
         </div>
@@ -1036,18 +1063,26 @@ function StrategyPlanDetail({ plan, policy, detail }: StrategyPlanDetailProps) {
         <Table<StrategyAttribution>
           className="strategy-table strategy-report-table"
           size="small"
-          rowKey={(record) => `${record.customer}-${record.model}`}
+          rowKey={(record) => `${record.uid}-${record.model}`}
           dataSource={plan.attributions}
           pagination={false}
           scroll={{ x: 'max-content' }}
           columns={[
-            { title: '客户名称', dataIndex: 'customer' },
+            { title: '优先级', render: (_v, _r, index) => index + 1, width: 64 },
+            { title: '客户名称', dataIndex: 'customerName' },
+            { title: 'uid', dataIndex: 'uid' },
             { title: '模型名称', dataIndex: 'model' },
-            { title: '单TPM收入（元/TPM）', dataIndex: 'density', render: (value) => Number(value).toFixed(4) },
-            { title: '调整前自建水位（万TPM）', dataIndex: 'beforeVolume', render: numberText },
-            { title: '调整后自建水位（万TPM）', dataIndex: 'afterVolume', render: numberText },
-            { title: 'delta自建增加调用量（万TPM）', dataIndex: 'deltaVolume', render: (value) => <span className="positive">+{numberText(value)}</span> },
-            { title: '收益（元/天）', dataIndex: 'gain', render: (value) => <span className="positive">+{money(value)}</span> },
+            { title: '百万token单价（元）', dataIndex: 'pricePerMillionTokens', render: (value) => Number(value).toFixed(2) },
+            { title: '边际收入（元/天）', dataIndex: 'marginalRevenue', render: (value) => <span className={Number(value) >= 0 ? 'positive' : undefined}>{Number(value) >= 0 ? '+' : ''}{money(value)}</span> },
+            { title: '调整前水位（万TPM）', dataIndex: 'beforeVolume', render: numberText },
+            { title: '调整后水位（万TPM）', dataIndex: 'afterVolume', render: numberText },
+            { title: 'delta自建增加调用量（万TPM）', dataIndex: 'deltaVolume', render: (value) => <span className={Number(value) >= 0 ? 'positive' : undefined}>{Number(value) >= 0 ? '+' : ''}{numberText(value)}</span> },
+            ...(!isDemandPlan ? [
+              { title: '调整前面积（万TPM·h）', dataIndex: 'beforeArea', render: numberText },
+              { title: '调整后面积（万TPM·h）', dataIndex: 'afterArea', render: numberText },
+              { title: '面积变化（万TPM·h）', dataIndex: 'deltaArea', render: (value: number) => <span className={Number(value) >= 0 ? 'positive' : undefined}>{Number(value) >= 0 ? '+' : ''}{numberText(value)}</span> },
+            ] : []),
+            { title: '单tpm收入（元/TPM）', dataIndex: 'density', render: (value) => Number(value).toFixed(4) },
           ]}
         />
       </section>

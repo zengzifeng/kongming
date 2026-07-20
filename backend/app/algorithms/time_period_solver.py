@@ -134,11 +134,15 @@ class TimePeriodSolver(SolverEconomicsMixin):
         # 腾挪前后利用率：用**本次方案规划的自建峰值**（水位注水后 after 的逐时自建量）而非当前监控自建量，
         # 否则大部分需求当前在三方、监控自建≈0，利用率会失真为~0。口径=模型级：该模型规划自建峰值 /
         # 该模型集群总容量（分别按腾挪前/后机器数）。
-        model_self_peak = self._model_self_peak(after, snapshot.demands, timeline)
-        self._enrich_move_utilization(node_moves, model_self_peak, clusters, machines_before, machines_after)
+        # 腾挪前后利用率（面积口径）：该模型所有客户自建波形叠加的承接面积 / 集群承载能力面积
+        # （容量 × 时段总分钟）。分子用规划/存量自建量，非当前监控自建量。
+        model_self_area = self._model_self_area(after, snapshot.demands, timeline)
+        total_minutes = sum(self._slot_minutes(timeline).values())
+        self._enrich_move_utilization(node_moves, model_self_area, total_minutes,
+                                      clusters, machines_before, machines_after)
         if rebalance_diag.get("moves"):
-            self._enrich_move_utilization(rebalance_diag["moves"], model_self_peak, clusters,
-                                          machines_before, machines_after)
+            self._enrich_move_utilization(rebalance_diag["moves"], model_self_area, total_minutes,
+                                          clusters, machines_before, machines_after)
 
         # ---- E. 约束体检 ----
         constraints = self._build_constraints(
@@ -273,15 +277,16 @@ class TimePeriodSolver(SolverEconomicsMixin):
         result.sort(key=lambda x: x["machine_count"], reverse=True)
         return result
 
-    def _model_self_peak(self, after: dict, demands: list, timeline: list[str]) -> dict[str, float]:
-        """本次方案规划的逐模型自建峰值 = 该模型**所有在自建上跑量的客户**自建量按时点叠加后取峰值。
+    def _model_self_area(self, after: dict, demands: list, timeline: list[str]) -> dict[str, float]:
+        """本次方案逐模型的自建「面积」= 该模型**所有在自建上跑量的客户**自建波形按时点叠加后、
+        再乘每时段时长积分而成：面积 = Σ_t ( Σ_i 自建量_i(t) ) × 时长(t)  （单位 tokens/时段）。
 
         含两类客户，避免漏算占着产能的存量自建：
         - 进入水位优化的候选：取 after 里逐时规划自建量（slots.self_tpm）；
         - 未进候选的需求（已全自建被拒 already_fully_self_hosted、固定档位客户等）：按其
           current_self_ratio × 波形 计其既有自建量（这部分实打实占着集群产能）。
-        用「规划/既有自建量」而非「当前监控自建」算利用率，且不遗漏非候选的存量自建。
         """
+        slot_minutes = self._slot_minutes(timeline)
         by_model_ts: dict[str, dict[str, float]] = {}
         covered: set[str] = set()
         for wm in after.get("watermarks", []):
@@ -298,17 +303,20 @@ class TimePeriodSolver(SolverEconomicsMixin):
             for ts, tpm in self._series_of(d, timeline):
                 by_model_ts.setdefault(m, {}).setdefault(ts, 0.0)
                 by_model_ts[m][ts] += float(tpm) * d.current_self_ratio
-        return {m: (max(v.values()) if v else 0.0) for m, v in by_model_ts.items()}
+        # 叠加后逐时点 × 时长 求和 = 承接面积
+        return {m: sum(v * slot_minutes.get(ts, 60.0) for ts, v in ts_map.items())
+                for m, ts_map in by_model_ts.items()}
 
     @staticmethod
-    def _enrich_move_utilization(moves: list[dict], model_self_peak: dict[str, float],
-                                 clusters: list[dict],
+    def _enrich_move_utilization(moves: list[dict], model_self_area: dict[str, float],
+                                 total_minutes: float, clusters: list[dict],
                                  machines_before: dict[str, int],
                                  machines_after: dict[str, int]) -> None:
-        """给每条腾挪记录补源/目标集群的腾挪前后利用率。
+        """给每条腾挪记录补源/目标集群的腾挪前后利用率（面积口径）。
 
-        利用率（模型级口径）= 该模型本次规划的自建峰值 / 该模型全部集群总承载(机器数 × 单机承载)。
-        分别用腾挪前(machines_before)、腾挪后(machines_after)的机器数算容量。总承载为 0 时记 0。
+        利用率 = 该模型所有客户自建波形叠加出的**实际承接面积** / 该模型集群的**承载能力面积**，
+        其中承载能力面积 = 该模型全部集群总容量(机器数 × 单机承载, tokens/分) × 时段总分钟。
+        分别用腾挪前(machines_before)、腾挪后(machines_after)的机器数算承载面积。承载为 0 时记 0。
         """
         model_of = {c["cluster_name"]: str(c.get("deployed_model", "")).lower() for c in clusters}
         rate_of = {c["cluster_name"]: float(c.get("tpm_per_machine", 0) or 0) for c in clusters}
@@ -322,9 +330,10 @@ class TimePeriodSolver(SolverEconomicsMixin):
                 return 0.0
             cap = sum(int(machines_map.get(n, 0) or 0) * rate_of.get(n, 0.0)
                       for n in clusters_of_model.get(model, []))
-            if cap <= 0:
+            cap_area = cap * total_minutes  # 承载能力面积 = 容量 × 时段总分钟
+            if cap_area <= 0:
                 return 0.0
-            return model_self_peak.get(model, 0.0) / cap
+            return model_self_area.get(model, 0.0) / cap_area
 
         for mv in moves:
             src = mv.get("from_cluster")
@@ -961,6 +970,7 @@ class TimePeriodSolver(SolverEconomicsMixin):
                     "customer_name": c.demand.customer_name,
                     "model": c.demand.model_name, "current_self_ratio": c.demand.current_self_ratio,
                     "watermark_self_tpm": level,        # 固定水位线（本次调整一次性设定）
+                    "unit_self_revenue": unit,          # 自建单价(元/百万token)——求解器承接排序键，供报告体现优先级
                     "fallback_vendor": (c.best_vendor or {}).get("vendor"),
                     "slots": slots, "customer_revenue_gain": cust_gain,
                 })
